@@ -3,6 +3,7 @@
   "displayName": "Neon Postgres Sync",
   "description": "Sync local files with Neon Postgres records (Text-based)",
   "version": "0.0.1",
+  "publisher": "ciuzaak",
   "engines": {
     "vscode": "^1.80.0"
   },
