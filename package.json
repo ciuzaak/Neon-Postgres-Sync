@@ -1,7 +1,7 @@
 {
   "name": "neon-postgres-sync",
   "displayName": "Neon Postgres Sync",
-  "description": "Sync local JSON files with Neon Postgres records",
+  "description": "Sync local files with Neon Postgres records (Text-based)",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.80.0"
