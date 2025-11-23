@@ -1,0 +1,80 @@
+{
+  "name": "neon-postgres-sync",
+  "displayName": "Neon Postgres Sync",
+  "description": "Sync local JSON files with Neon Postgres records",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "neonSync.downloadFile",
+        "title": "Neon Sync: Download File"
+      },
+      {
+        "command": "neonSync.uploadFile",
+        "title": "Neon Sync: Upload File"
+      },
+      {
+        "command": "neonSync.configureUrl",
+        "title": "Neon Sync: Configure Connection URL"
+      },
+      {
+        "command": "neonSync.confirmSync",
+        "title": "Confirm Sync",
+        "icon": "$(check)"
+      },
+      {
+        "command": "neonSync.cancelSync",
+        "title": "Cancel Sync",
+        "icon": "$(close)"
+      },
+      {
+        "command": "neonSync.openConfigFile",
+        "title": "Neon Sync: Open Config File"
+      },
+      {
+        "command": "neonSync.openSettings",
+        "title": "Neon Sync: Open Settings"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "neonSync.confirmSync",
+          "group": "navigation",
+          "when": "neonSync.isSyncing"
+        },
+        {
+          "command": "neonSync.cancelSync",
+          "group": "navigation",
+          "when": "neonSync.isSyncing"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Neon Postgres Sync",
+      "properties": {}
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/pg": "^8.10.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.1.3"
+  },
+  "dependencies": {
+    "pg": "^8.11.0"
+  }
+}

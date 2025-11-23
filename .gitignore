@@ -1,0 +1,9 @@
+node_modules/
+out/
+.vscode-test/
+*.vsix
+.DS_Store
+test_jsonc.json
+test.txt
+*.log
+neon-sync.json
