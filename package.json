@@ -4,6 +4,11 @@
   "description": "Sync local files with Neon Postgres records (Text-based)",
   "version": "0.0.1",
   "publisher": "ciuzaak",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ciuzaak/Neon-Postgres-Sync.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
