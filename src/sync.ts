@@ -49,6 +49,9 @@ export class SyncManager {
                 return;
             }
 
+            // Get the language ID from the original file (e.g., 'jsonc' for JSON with Comments)
+            const languageId = await this.getLanguageIdForFile(profile.filePath);
+
             // Temp file for Local Content (Left side - Read Only ideally, but VS Code diff makes both editable usually)
             // We treat Left as "Original" and Right as "Modified/Candidate"
             const ext = path.extname(profile.filePath) || '.txt';
@@ -61,6 +64,12 @@ export class SyncManager {
 
             const leftUri = vscode.Uri.file(leftPath);
             const rightUri = vscode.Uri.file(rightPath);
+
+            // Set the language mode for temp files to match the original file
+            if (languageId) {
+                await this.setDocumentLanguage(leftUri, languageId);
+                await this.setDocumentLanguage(rightUri, languageId);
+            }
 
             this.currentSession = {
                 type: 'download',
@@ -101,6 +110,9 @@ export class SyncManager {
                 return;
             }
 
+            // Get the language ID from the original file (e.g., 'jsonc' for JSON with Comments)
+            const languageId = await this.getLanguageIdForFile(profile.filePath);
+
             // Temp file for Remote Content (Left side - Reference)
             const ext = path.extname(profile.filePath) || '.txt';
             const leftPath = path.join(os.tmpdir(), `remote_${profile.name}_${Date.now()}${ext}`);
@@ -112,6 +124,12 @@ export class SyncManager {
 
             const leftUri = vscode.Uri.file(leftPath);
             const rightUri = vscode.Uri.file(rightPath);
+
+            // Set the language mode for temp files to match the original file
+            if (languageId) {
+                await this.setDocumentLanguage(leftUri, languageId);
+                await this.setDocumentLanguage(rightUri, languageId);
+            }
 
             this.currentSession = {
                 type: 'upload',
@@ -230,5 +248,38 @@ export class SyncManager {
             return path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, filePath);
         }
         return filePath;
+    }
+
+    /**
+     * Get the language ID for a file based on VS Code's file associations.
+     * This allows temp files to inherit the correct language mode (e.g., 'jsonc' for .json files with comments).
+     */
+    private static async getLanguageIdForFile(filePath: string): Promise<string | undefined> {
+        const absolutePath = this.resolvePath(filePath);
+        const uri = vscode.Uri.file(absolutePath);
+
+        // If the file exists, open it temporarily to get its language ID
+        if (fs.existsSync(absolutePath)) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                return doc.languageId;
+            } catch (e) {
+                console.error(`Failed to get language ID for ${filePath}`, e);
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Set the language mode for a temporary file document to match the original file's language.
+     */
+    private static async setDocumentLanguage(uri: vscode.Uri, languageId: string): Promise<void> {
+        try {
+            const doc = await vscode.workspace.openTextDocument(uri);
+            await vscode.languages.setTextDocumentLanguage(doc, languageId);
+        } catch (e) {
+            console.error(`Failed to set language for temp file`, e);
+        }
     }
 }

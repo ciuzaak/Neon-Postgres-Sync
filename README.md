@@ -6,6 +6,7 @@ Sync local files with Neon Postgres records. This extension allows you to upload
 
 -   **Text-based Sync**: Preserves comments, whitespace, and formatting in your files.
 -   **Interactive Diff**: Review changes before confirming uploads or downloads using VS Code's built-in diff view.
+-   **Smart Language Detection**: Diff views respect file associations (e.g., JSONC files display without false syntax errors).
 -   **Secure Storage**: Your database connection string is stored securely using VS Code's Secret Storage.
 -   **Profile Management**: Manage multiple file-to-record mappings via a simple JSON configuration file.
 -   **Local Timezone**: Database timestamps (`create_time`, `update_time`) are recorded in your local timezone.

@@ -7,3 +7,4 @@ test_jsonc.json
 test.txt
 *.log
 neon-sync.json
+package-lock.json
