@@ -11,10 +11,32 @@ interface SyncSession {
     profile: Profile;
     candidateUri: vscode.Uri; // The file being edited/confirmed (Right side)
     tempFiles: string[]; // Files to clean up
+    editorCloseDisposable?: vscode.Disposable; // Listener for editor close
 }
 
 export class SyncManager {
     private static currentSession: SyncSession | null = null;
+
+    /**
+     * Register a listener to detect when the diff editor is closed,
+     * so we can cleanup temp files even if user doesn't click confirm/cancel.
+     */
+    private static registerEditorCloseListener(): vscode.Disposable {
+        return vscode.window.onDidChangeVisibleTextEditors((editors) => {
+            if (!this.currentSession) return;
+
+            // Check if the candidate file is still open in any visible editor
+            const candidatePath = this.currentSession.candidateUri.fsPath;
+            const isStillOpen = editors.some(editor =>
+                editor.document.uri.fsPath === candidatePath
+            );
+
+            // If the diff editor was closed (candidate file no longer visible)
+            if (!isStillOpen) {
+                this.cleanupSession(false); // Don't close editor, it's already closed
+            }
+        });
+    }
 
     static async startDownload(profileName: string) {
         const profile = ConfigManager.getProfile(profileName);
@@ -23,67 +45,66 @@ export class SyncManager {
             return;
         }
 
-        try {
-            const remoteData = await DatabaseService.fetchRecord(profile);
-            if (remoteData === null) {
-                vscode.window.showWarningMessage(`No record found for ID "${profile.id}" in database.`);
-                return;
+        await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `Downloading ${profile.name}...` },
+            async () => {
+                try {
+                    const remoteData = await DatabaseService.fetchRecord(profile);
+                    if (remoteData === null) {
+                        vscode.window.showWarningMessage(`No record found for ID "${profile.id}" in database.`);
+                        return;
+                    }
+
+                    const absolutePath = this.resolvePath(profile.filePath);
+
+                    // Local: Current file content (or empty if new file)
+                    let localContent = '';
+                    if (fs.existsSync(absolutePath)) {
+                        localContent = fs.readFileSync(absolutePath, 'utf-8');
+                    }
+
+                    const remoteContentFormatted = remoteData || '';
+
+                    // Check if content is identical (only if local file exists)
+                    if (fs.existsSync(absolutePath) && localContent === remoteContentFormatted) {
+                        vscode.window.showInformationMessage('Content is identical. No sync needed.');
+                        return;
+                    }
+
+                    // Get the language ID from the original file
+                    const languageId = await this.getLanguageIdForFile(profile.filePath);
+
+                    const ext = path.extname(profile.filePath) || '.txt';
+                    const leftPath = path.join(os.tmpdir(), `local_${profile.name}_${Date.now()}${ext}`);
+                    fs.writeFileSync(leftPath, localContent);
+
+                    const rightPath = path.join(os.tmpdir(), `remote_${profile.name}_${Date.now()}${ext}`);
+                    fs.writeFileSync(rightPath, remoteContentFormatted);
+
+                    const leftUri = vscode.Uri.file(leftPath);
+                    const rightUri = vscode.Uri.file(rightPath);
+
+                    if (languageId) {
+                        await this.setDocumentLanguage(leftUri, languageId);
+                        await this.setDocumentLanguage(rightUri, languageId);
+                    }
+
+                    this.currentSession = {
+                        type: 'download',
+                        profile: profile,
+                        candidateUri: rightUri,
+                        tempFiles: [leftPath, rightPath],
+                        editorCloseDisposable: this.registerEditorCloseListener()
+                    };
+
+                    await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
+                    await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${profile.name}: Local ← Remote`);
+
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Error starting download: ${error.message}`);
+                }
             }
-
-            const absolutePath = this.resolvePath(profile.filePath);
-
-            // 2. Prepare content for diff
-            // Local: Current file content (or empty object if new)
-            let localContent = '{}';
-            if (fs.existsSync(absolutePath)) {
-                localContent = fs.readFileSync(absolutePath, 'utf-8');
-            }
-
-            // Remote: We want to show what the file WILL look like after update.
-            // So we use the remote data as is.
-            let remoteContentFormatted = remoteData || '';
-
-            // Check if content is identical (only if local file exists)
-            if (fs.existsSync(absolutePath) && localContent === remoteContentFormatted) {
-                vscode.window.showInformationMessage('Content is identical. No sync needed.');
-                return;
-            }
-
-            // Get the language ID from the original file (e.g., 'jsonc' for JSON with Comments)
-            const languageId = await this.getLanguageIdForFile(profile.filePath);
-
-            // Temp file for Local Content (Left side - Read Only ideally, but VS Code diff makes both editable usually)
-            // We treat Left as "Original" and Right as "Modified/Candidate"
-            const ext = path.extname(profile.filePath) || '.txt';
-            const leftPath = path.join(os.tmpdir(), `local_${profile.name}_${Date.now()}${ext}`);
-            fs.writeFileSync(leftPath, localContent);
-
-            // Temp file for Remote Content (Right side - Candidate for saving)
-            const rightPath = path.join(os.tmpdir(), `remote_${profile.name}_${Date.now()}${ext}`);
-            fs.writeFileSync(rightPath, remoteContentFormatted);
-
-            const leftUri = vscode.Uri.file(leftPath);
-            const rightUri = vscode.Uri.file(rightPath);
-
-            // Set the language mode for temp files to match the original file
-            if (languageId) {
-                await this.setDocumentLanguage(leftUri, languageId);
-                await this.setDocumentLanguage(rightUri, languageId);
-            }
-
-            this.currentSession = {
-                type: 'download',
-                profile: profile,
-                candidateUri: rightUri,
-                tempFiles: [leftPath, rightPath]
-            };
-
-            await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
-            await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `Sync Download: ${profile.name} (Right is Remote / Candidate)`);
-
-        } catch (error: any) {
-            vscode.window.showErrorMessage(`Error starting download: ${error.message} `);
-        }
+        );
     }
 
     static async startUpload(profileName: string) {
@@ -93,57 +114,58 @@ export class SyncManager {
             return;
         }
 
-        try {
-            const remoteData = await DatabaseService.fetchRecord(profile);
-            const localFilePath = this.resolvePath(profile.filePath);
+        await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `Preparing upload for ${profile.name}...` },
+            async () => {
+                try {
+                    const remoteData = await DatabaseService.fetchRecord(profile);
+                    const localFilePath = this.resolvePath(profile.filePath);
 
-            if (!fs.existsSync(localFilePath)) {
-                vscode.window.showErrorMessage(`Local file not found: ${localFilePath} `);
-                return;
+                    if (!fs.existsSync(localFilePath)) {
+                        vscode.window.showErrorMessage(`Local file not found: ${localFilePath}`);
+                        return;
+                    }
+                    const localData = fs.readFileSync(localFilePath, 'utf-8');
+
+                    const remoteContent = remoteData || '';
+                    if (localData === remoteContent) {
+                        vscode.window.showInformationMessage('Content is identical. No sync needed.');
+                        return;
+                    }
+
+                    const languageId = await this.getLanguageIdForFile(profile.filePath);
+
+                    const ext = path.extname(profile.filePath) || '.txt';
+                    const leftPath = path.join(os.tmpdir(), `remote_${profile.name}_${Date.now()}${ext}`);
+                    fs.writeFileSync(leftPath, remoteContent);
+
+                    const rightPath = path.join(os.tmpdir(), `local_${profile.name}_${Date.now()}${ext}`);
+                    fs.writeFileSync(rightPath, localData);
+
+                    const leftUri = vscode.Uri.file(leftPath);
+                    const rightUri = vscode.Uri.file(rightPath);
+
+                    if (languageId) {
+                        await this.setDocumentLanguage(leftUri, languageId);
+                        await this.setDocumentLanguage(rightUri, languageId);
+                    }
+
+                    this.currentSession = {
+                        type: 'upload',
+                        profile: profile,
+                        candidateUri: rightUri,
+                        tempFiles: [leftPath, rightPath],
+                        editorCloseDisposable: this.registerEditorCloseListener()
+                    };
+
+                    await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
+                    await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${profile.name}: Remote ← Local`);
+
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Error starting upload: ${error.message}`);
+                }
             }
-            const localData = fs.readFileSync(localFilePath, 'utf-8');
-
-            // Check if content is identical
-            const remoteContent = remoteData || '';
-            if (localData === remoteContent) {
-                vscode.window.showInformationMessage('Content is identical. No sync needed.');
-                return;
-            }
-
-            // Get the language ID from the original file (e.g., 'jsonc' for JSON with Comments)
-            const languageId = await this.getLanguageIdForFile(profile.filePath);
-
-            // Temp file for Remote Content (Left side - Reference)
-            const ext = path.extname(profile.filePath) || '.txt';
-            const leftPath = path.join(os.tmpdir(), `remote_${profile.name}_${Date.now()}${ext}`);
-            fs.writeFileSync(leftPath, remoteContent);
-
-            // Temp file for Local Content (Right side - Candidate for saving)
-            const rightPath = path.join(os.tmpdir(), `local_${profile.name}_${Date.now()}${ext}`);
-            fs.writeFileSync(rightPath, localData);
-
-            const leftUri = vscode.Uri.file(leftPath);
-            const rightUri = vscode.Uri.file(rightPath);
-
-            // Set the language mode for temp files to match the original file
-            if (languageId) {
-                await this.setDocumentLanguage(leftUri, languageId);
-                await this.setDocumentLanguage(rightUri, languageId);
-            }
-
-            this.currentSession = {
-                type: 'upload',
-                profile: profile,
-                candidateUri: rightUri,
-                tempFiles: [leftPath, rightPath]
-            };
-
-            await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
-            await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `Sync Upload: ${profile.name} (Right is Local / Candidate)`);
-
-        } catch (error: any) {
-            vscode.window.showErrorMessage(`Error starting upload: ${error.message} `);
-        }
+        );
     }
 
     static async confirmSync() {
@@ -205,7 +227,7 @@ export class SyncManager {
             const snippet = candidateContent ? candidateContent.substring(0, 100) : 'empty';
             vscode.window.showErrorMessage(`Error confirming sync: ${error.message}. Content snippet: ${snippet}`);
         } finally {
-            this.cleanupSession();
+            this.cleanupSession(true);
         }
     }
 
@@ -214,16 +236,20 @@ export class SyncManager {
             return;
         }
         vscode.window.showInformationMessage('Sync cancelled.');
-        this.cleanupSession();
+        this.cleanupSession(true);
     }
 
-    private static cleanupSession() {
+    private static cleanupSession(closeEditor: boolean = true) {
         if (this.currentSession) {
-            // Close the diff editor? Hard to target specifically without closing active editor.
-            // For now, we just reset context and clean up files.
-            // Ideally we should close the editor to avoid confusion, but VS Code API for closing specific editors is limited.
-            // We can try `workbench.action.closeActiveEditor` if we assume the diff is active.
-            vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+            // Dispose the editor close listener
+            if (this.currentSession.editorCloseDisposable) {
+                this.currentSession.editorCloseDisposable.dispose();
+            }
+
+            // Close the diff editor if requested
+            if (closeEditor) {
+                vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+            }
 
             // Delete temp files
             for (const file of this.currentSession.tempFiles) {
@@ -231,7 +257,7 @@ export class SyncManager {
                     try {
                         fs.unlinkSync(file);
                     } catch (e) {
-                        console.error(`Failed to delete temp file ${file} `, e);
+                        console.error(`Failed to delete temp file ${file}`, e);
                     }
                 }
             }

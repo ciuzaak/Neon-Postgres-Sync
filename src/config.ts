@@ -109,11 +109,17 @@ export class ConfigManager {
 
     static async saveProfiles(profiles: Profile[]): Promise<void> {
         const configPath = this.getConfigPath();
-        if (configPath && fs.existsSync(configPath)) {
-            const config = this.readConfig() || { profiles: [] };
-            config.profiles = profiles;
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        if (!configPath) {
+            vscode.window.showErrorMessage('Extension not initialized correctly.');
+            return;
         }
+
+        let config: ConfigFile = { profiles: [] };
+        if (fs.existsSync(configPath)) {
+            config = this.readConfig() || { profiles: [] };
+        }
+        config.profiles = profiles;
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     }
 
     static async openConfigFile(): Promise<void> {

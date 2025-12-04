@@ -2,6 +2,25 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.2.0] - 2025-12-05
+### Security
+- Added table name validation to prevent SQL injection attacks
+
+### Added
+- **MRU Profile Ordering**: Most recently used profile appears first in the selection list
+- **Single Profile Auto-Select**: Skip profile selection when only one profile is configured
+- **Loading Progress**: Show progress notification during sync operations
+- **Auto Cleanup**: Temp files are now automatically deleted when closing the diff editor
+
+### Improved
+- **Diff Title**: Simplified to `Profile: Local ← Remote` / `Profile: Remote ← Local`
+- Changed default content for new files from `{}` to empty string
+- Fixed `saveProfiles()` to create config file if it doesn't exist
+
+### Code Quality
+- Changed `let` to `const` for immutable variables
+- Added JSDoc comments for key methods
+
 ## [0.1.0] - 2025-12-04
 - **Improved Diff View**: Temp files now inherit the original file's language mode (e.g., JSONC), preventing false syntax error highlights in the diff editor.
 

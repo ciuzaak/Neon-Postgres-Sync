@@ -8,6 +8,15 @@ export class DatabaseService {
     private static readonly CREATE_TIME_COLUMN = 'create_time';
     private static readonly UPDATE_TIME_COLUMN = 'update_time';
 
+    /**
+     * Validates table name to prevent SQL injection.
+     * Allows only valid SQL identifiers: letters, numbers, underscores.
+     * Supports schema.table format.
+     */
+    private static validateTableName(tableName: string): boolean {
+        return /^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/.test(tableName);
+    }
+
     private static async getClient(): Promise<Client> {
         const connectionString = await ConfigManager.getConnectionString();
         if (!connectionString) {
@@ -19,6 +28,9 @@ export class DatabaseService {
     }
 
     static async fetchRecord(profile: Profile): Promise<string | null> {
+        if (!this.validateTableName(profile.tableName)) {
+            throw new Error(`Invalid table name: "${profile.tableName}". Only letters, numbers, and underscores are allowed.`);
+        }
         let client: Client | undefined;
         try {
             client = await this.getClient();
@@ -41,6 +53,9 @@ export class DatabaseService {
     }
 
     static async updateRecord(profile: Profile, data: string): Promise<void> {
+        if (!this.validateTableName(profile.tableName)) {
+            throw new Error(`Invalid table name: "${profile.tableName}". Only letters, numbers, and underscores are allowed.`);
+        }
         let client: Client | undefined;
         try {
             client = await this.getClient();
