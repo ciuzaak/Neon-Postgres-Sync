@@ -22,8 +22,12 @@ export class SyncManager {
      * so we can cleanup temp files even if user doesn't click confirm/cancel.
      */
     private static registerEditorCloseListener(): vscode.Disposable {
+        // Delay activation to let the diff editor fully open
+        let isActive = false;
+        setTimeout(() => { isActive = true; }, 500);
+
         return vscode.window.onDidChangeVisibleTextEditors((editors) => {
-            if (!this.currentSession) return;
+            if (!this.currentSession || !isActive) return;
 
             // Check if the candidate file is still open in any visible editor
             const candidatePath = this.currentSession.candidateUri.fsPath;

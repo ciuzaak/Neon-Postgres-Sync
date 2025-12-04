@@ -2,6 +2,10 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.2.1] - 2025-12-05
+### Fixed
+- Fixed confirm/cancel buttons not showing during sync (race condition in editor close listener)
+
 ## [0.2.0] - 2025-12-05
 ### Security
 - Added table name validation to prevent SQL injection attacks
