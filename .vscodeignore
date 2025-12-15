@@ -1,0 +1,17 @@
+.vscode/**
+.vscode-test/**
+src/**
+node_modules/**
+.git/**
+.gitignore
+*.vsix
+*.log
+*.md
+!README.md
+!CHANGELOG.md
+tsconfig.json
+package-lock.json
+test_jsonc.json
+test.txt
+neon-sync.json
+.DS_Store
