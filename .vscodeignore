@@ -2,7 +2,20 @@
 .vscode-test/**
 src/**
 node_modules/**/@types/**
+node_modules/@types/**
 node_modules/**/typescript/**
+node_modules/**/*.d.ts
+node_modules/**/*.d.mts
+node_modules/**/*.map
+node_modules/**/src/**
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/README.md
+node_modules/**/CHANGELOG.md
+node_modules/**/CONFIG.md
+node_modules/**/DEPLOY.md
+node_modules/**/.travis.yml
+node_modules/**/.jshintrc
 .git/**
 .gitignore
 *.vsix
@@ -16,3 +29,4 @@ test_jsonc.json
 test.txt
 neon-sync.json
 .DS_Store
+out/*.map

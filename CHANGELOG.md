@@ -2,6 +2,23 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.3.1] - 2026-02-25
+### Improved
+- Reduced VSIX package size by tightening `.vscodeignore` exclusions (removed unnecessary maps/types/docs/tests from packaged dependencies)
+- Compressed extension icon asset to further reduce package size
+
+## [0.3.0] - 2026-02-25
+### Added
+- Persisted MRU profile ordering across window reloads using global state
+
+### Changed
+- Switched to HTTP transport only (`@neondatabase/serverless`); TCP/pg mode removed
+- Updated record timestamps to database-generated `CURRENT_TIMESTAMP`
+
+### Fixed
+- Cleared cached SQL client instances when connection string is updated
+- Hardened HTTP query result handling with runtime response-shape validation
+
 ## [0.2.1] - 2025-12-05
 ### Fixed
 - Fixed confirm/cancel buttons not showing during sync (race condition in editor close listener)

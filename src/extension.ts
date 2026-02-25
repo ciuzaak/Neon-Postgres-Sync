@@ -1,15 +1,53 @@
 import * as vscode from 'vscode';
-import { ConfigManager } from './config';
+import { ConfigManager, Profile } from './config';
 import { SyncManager } from './sync';
 import { SettingsPanel } from './settingsWebview';
 
-// Track last used profile for MRU ordering
-let lastUsedProfile: string | undefined;
+const PROFILE_ORDER_STATE_KEY = 'neonSync.profileOrder';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "neon-postgres-sync" is now active!');
 
     ConfigManager.initialize(context);
+    let profileOrder = context.globalState.get<string[]>(PROFILE_ORDER_STATE_KEY, []);
+
+    const pruneAndPersistProfileOrder = async (profiles: Profile[]): Promise<void> => {
+        const profileNames = new Set(profiles.map((p) => p.name));
+        const pruned = profileOrder.filter((name) => profileNames.has(name));
+        if (pruned.length === profileOrder.length) {
+            return;
+        }
+        profileOrder = pruned;
+        await context.globalState.update(PROFILE_ORDER_STATE_KEY, profileOrder);
+    };
+
+    const sortProfilesBySavedOrder = async (profiles: Profile[]): Promise<Profile[]> => {
+        await pruneAndPersistProfileOrder(profiles);
+        const orderIndex = new Map(profileOrder.map((name, index) => [name, index]));
+
+        return [...profiles].sort((a, b) => {
+            const aIndex = orderIndex.get(a.name);
+            const bIndex = orderIndex.get(b.name);
+
+            if (aIndex === undefined && bIndex === undefined) {
+                return 0;
+            }
+            if (aIndex === undefined) {
+                return 1;
+            }
+            if (bIndex === undefined) {
+                return -1;
+            }
+            return aIndex - bIndex;
+        });
+    };
+
+    const recordProfileUsage = async (profileName: string, profiles: Profile[]): Promise<void> => {
+        const profileNames = new Set(profiles.map((p) => p.name));
+        profileOrder = [profileName, ...profileOrder.filter((name) => name !== profileName)];
+        profileOrder = profileOrder.filter((name) => profileNames.has(name));
+        await context.globalState.update(PROFILE_ORDER_STATE_KEY, profileOrder);
+    };
 
     const downloadDisposable = vscode.commands.registerCommand('neonSync.downloadFile', async () => {
         const profiles = ConfigManager.getProfiles();
@@ -20,23 +58,19 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Auto-select if only one profile
         if (profiles.length === 1) {
-            lastUsedProfile = profiles[0].name;
-            SyncManager.startDownload(profiles[0].name);
+            await recordProfileUsage(profiles[0].name, profiles);
+            await SyncManager.startDownload(profiles[0].name);
             return;
         }
 
-        // MRU ordering: put last used profile first
-        const sortedProfiles = [...profiles].sort((a, b) => {
-            if (a.name === lastUsedProfile) return -1;
-            if (b.name === lastUsedProfile) return 1;
-            return 0;
-        });
+        // MRU ordering: keep persisted profile order across window reloads.
+        const sortedProfiles = await sortProfilesBySavedOrder(profiles);
 
         const items = sortedProfiles.map(p => ({ label: p.name, description: p.filePath }));
         const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select profile to download' });
         if (selected) {
-            lastUsedProfile = selected.label;
-            SyncManager.startDownload(selected.label);
+            await recordProfileUsage(selected.label, profiles);
+            await SyncManager.startDownload(selected.label);
         }
     });
 
@@ -49,23 +83,19 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Auto-select if only one profile
         if (profiles.length === 1) {
-            lastUsedProfile = profiles[0].name;
-            SyncManager.startUpload(profiles[0].name);
+            await recordProfileUsage(profiles[0].name, profiles);
+            await SyncManager.startUpload(profiles[0].name);
             return;
         }
 
-        // MRU ordering: put last used profile first
-        const sortedProfiles = [...profiles].sort((a, b) => {
-            if (a.name === lastUsedProfile) return -1;
-            if (b.name === lastUsedProfile) return 1;
-            return 0;
-        });
+        // MRU ordering: keep persisted profile order across window reloads.
+        const sortedProfiles = await sortProfilesBySavedOrder(profiles);
 
         const items = sortedProfiles.map(p => ({ label: p.name, description: p.filePath }));
         const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select profile to upload' });
         if (selected) {
-            lastUsedProfile = selected.label;
-            SyncManager.startUpload(selected.label);
+            await recordProfileUsage(selected.label, profiles);
+            await SyncManager.startUpload(selected.label);
         }
     });
 

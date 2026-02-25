@@ -19,6 +19,7 @@ export class ConfigManager {
     private static readonly SECRET_KEY = 'neonSync.connectionString';
     private static globalStorageUri: vscode.Uri | undefined;
     private static secrets: vscode.SecretStorage | undefined;
+    private static readonly connectionStringListeners = new Set<() => void>();
 
     static initialize(context: vscode.ExtensionContext) {
         this.globalStorageUri = context.globalStorageUri;
@@ -91,8 +92,26 @@ export class ConfigManager {
             await this.secrets.store(this.SECRET_KEY, url);
             // Ensure it's not in the file
             await this.removeConnectionStringFromFile();
+            this.notifyConnectionStringChanged();
         } else {
             vscode.window.showErrorMessage('SecretStorage not initialized.');
+        }
+    }
+
+    static onConnectionStringChanged(listener: () => void): vscode.Disposable {
+        this.connectionStringListeners.add(listener);
+        return new vscode.Disposable(() => {
+            this.connectionStringListeners.delete(listener);
+        });
+    }
+
+    private static notifyConnectionStringChanged() {
+        for (const listener of this.connectionStringListeners) {
+            try {
+                listener();
+            } catch (error) {
+                console.error('Error in connection string change listener:', error);
+            }
         }
     }
 
