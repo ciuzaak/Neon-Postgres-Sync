@@ -2,6 +2,10 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.3.2] - 2026-03-02
+### Added
+- **Keyboard Shortcut**: Press `Alt+Enter` in the diff view to quickly confirm sync
+
 ## [0.3.1] - 2026-02-25
 ### Improved
 - Reduced VSIX package size by tightening `.vscodeignore` exclusions (removed unnecessary maps/types/docs/tests from packaged dependencies)
