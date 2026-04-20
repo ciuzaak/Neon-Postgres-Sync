@@ -2,7 +2,7 @@
   "name": "neon-postgres-sync",
   "displayName": "Neon Postgres Sync",
   "description": "Sync local files with Neon Postgres records (Text-based)",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "publisher": "ciuzaak",
   "icon": "images/icon.png",
   "repository": {
@@ -20,12 +20,13 @@
   "contributes": {
     "commands": [
       {
-        "command": "neonSync.downloadFile",
-        "title": "Neon Sync: Download File"
+        "command": "neonSync.syncFile",
+        "title": "Neon Sync: Sync File"
       },
       {
-        "command": "neonSync.uploadFile",
-        "title": "Neon Sync: Upload File"
+        "command": "neonSync.swapSyncDirection",
+        "title": "Swap Sync Direction",
+        "icon": "$(arrow-swap)"
       },
       {
         "command": "neonSync.configureUrl",
@@ -53,13 +54,32 @@
     "menus": {
       "editor/title": [
         {
+          "command": "neonSync.swapSyncDirection",
+          "group": "navigation@1",
+          "when": "neonSync.isSyncing"
+        },
+        {
           "command": "neonSync.confirmSync",
-          "group": "navigation",
+          "group": "navigation@2",
           "when": "neonSync.isSyncing"
         },
         {
           "command": "neonSync.cancelSync",
-          "group": "navigation",
+          "group": "navigation@3",
+          "when": "neonSync.isSyncing"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "neonSync.swapSyncDirection",
+          "when": "neonSync.isSyncing"
+        },
+        {
+          "command": "neonSync.confirmSync",
+          "when": "neonSync.isSyncing"
+        },
+        {
+          "command": "neonSync.cancelSync",
           "when": "neonSync.isSyncing"
         }
       ]
@@ -72,6 +92,11 @@
       {
         "command": "neonSync.confirmSync",
         "key": "Alt+Enter",
+        "when": "neonSync.isSyncing"
+      },
+      {
+        "command": "neonSync.swapSyncDirection",
+        "key": "Alt+S",
         "when": "neonSync.isSyncing"
       }
     ]

@@ -49,54 +49,30 @@ export function activate(context: vscode.ExtensionContext) {
         await context.globalState.update(PROFILE_ORDER_STATE_KEY, profileOrder);
     };
 
-    const downloadDisposable = vscode.commands.registerCommand('neonSync.downloadFile', async () => {
+    const syncDisposable = vscode.commands.registerCommand('neonSync.syncFile', async () => {
         const profiles = ConfigManager.getProfiles();
         if (profiles.length === 0) {
             vscode.window.showErrorMessage('No profiles configured. Run "Neon Sync: Open Config File" to configure.');
             return;
         }
 
-        // Auto-select if only one profile
         if (profiles.length === 1) {
             await recordProfileUsage(profiles[0].name, profiles);
-            await SyncManager.startDownload(profiles[0].name);
+            await SyncManager.startSync(profiles[0].name);
             return;
         }
 
-        // MRU ordering: keep persisted profile order across window reloads.
         const sortedProfiles = await sortProfilesBySavedOrder(profiles);
-
         const items = sortedProfiles.map(p => ({ label: p.name, description: p.filePath }));
-        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select profile to download' });
+        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select profile to sync' });
         if (selected) {
             await recordProfileUsage(selected.label, profiles);
-            await SyncManager.startDownload(selected.label);
+            await SyncManager.startSync(selected.label);
         }
     });
 
-    const uploadDisposable = vscode.commands.registerCommand('neonSync.uploadFile', async () => {
-        const profiles = ConfigManager.getProfiles();
-        if (profiles.length === 0) {
-            vscode.window.showErrorMessage('No profiles configured. Run "Neon Sync: Open Config File" to configure.');
-            return;
-        }
-
-        // Auto-select if only one profile
-        if (profiles.length === 1) {
-            await recordProfileUsage(profiles[0].name, profiles);
-            await SyncManager.startUpload(profiles[0].name);
-            return;
-        }
-
-        // MRU ordering: keep persisted profile order across window reloads.
-        const sortedProfiles = await sortProfilesBySavedOrder(profiles);
-
-        const items = sortedProfiles.map(p => ({ label: p.name, description: p.filePath }));
-        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select profile to upload' });
-        if (selected) {
-            await recordProfileUsage(selected.label, profiles);
-            await SyncManager.startUpload(selected.label);
-        }
+    const swapDirectionDisposable = vscode.commands.registerCommand('neonSync.swapSyncDirection', async () => {
+        await SyncManager.swapSyncDirection();
     });
 
     const confirmSyncDisposable = vscode.commands.registerCommand('neonSync.confirmSync', async () => {
@@ -128,8 +104,8 @@ export function activate(context: vscode.ExtensionContext) {
         SettingsPanel.createOrShow(context.extensionUri);
     });
 
-    context.subscriptions.push(downloadDisposable);
-    context.subscriptions.push(uploadDisposable);
+    context.subscriptions.push(syncDisposable);
+    context.subscriptions.push(swapDirectionDisposable);
     context.subscriptions.push(configureUrlDisposable);
     context.subscriptions.push(confirmSyncDisposable);
     context.subscriptions.push(cancelSyncDisposable);

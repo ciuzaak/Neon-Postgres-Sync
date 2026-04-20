@@ -2,6 +2,16 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.4.0] - 2026-04-21
+### Added
+- **Unified Sync Command**: Single `Neon Sync: Sync File` command compares local file `mtime` with remote `update_time` and auto-picks a direction when the gap is clearly ≥ 5 seconds
+- **Explicit Prompt for Ambiguous Cases**: When the two timestamps differ by less than 5 seconds (including ties) or either side is missing a timestamp, a modal pauses and asks you to pick `Download (Local ← Remote)` or `Upload (Remote ← Local)` instead of auto-resolving. Missing local file / missing remote record still auto-pick the obvious direction.
+- **Swap Direction in Diff**: `⇄` icon in the diff title bar (or `Alt+S`) flips sync direction mid-review; warns before discarding candidate-side edits (detects both unsaved *and* saved changes)
+
+### Removed
+- `Neon Sync: Download File` and `Neon Sync: Upload File` — both cases are now covered by `Sync File` + swap
+- Dead `DatabaseService.fetchRecord` helper (superseded by `fetchRecordWithMeta`)
+
 ## [0.3.2] - 2026-03-02
 ### Added
 - **Keyboard Shortcut**: Press `Alt+Enter` in the diff view to quickly confirm sync

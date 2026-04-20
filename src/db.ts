@@ -79,17 +79,34 @@ export class DatabaseService {
         this.isConnectionStringListenerRegistered = true;
     }
 
-    private static async fetchRecordViaHttp(sql: HttpSql, profile: Profile): Promise<string | null> {
-        // `profile.tableName` is interpolated as an identifier, so we must validate it first.
-        const query = `SELECT ${this.DATA_COLUMN} FROM ${profile.tableName} WHERE ${this.ID_COLUMN} = $1`;
+    private static async fetchRecordWithMetaViaHttp(
+        sql: HttpSql,
+        profile: Profile
+    ): Promise<{ data: string | null; updateTime: Date | null }> {
+        const query = `SELECT ${this.DATA_COLUMN}, ${this.UPDATE_TIME_COLUMN} FROM ${profile.tableName} WHERE ${this.ID_COLUMN} = $1`;
         const result: unknown = await sql.query(query, [profile.id]);
         const rows = this.parseQueryRows(result);
 
-        if (rows.length > 0) {
-            const data = rows[0][this.DATA_COLUMN];
-            return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        if (rows.length === 0) {
+            return { data: null, updateTime: null };
         }
-        return null;
+
+        const row = rows[0];
+        const rawData = row[this.DATA_COLUMN];
+        const data = typeof rawData === 'string' ? rawData : JSON.stringify(rawData, null, 2);
+
+        const rawUpdateTime = row[this.UPDATE_TIME_COLUMN];
+        let updateTime: Date | null = null;
+        if (rawUpdateTime instanceof Date) {
+            updateTime = rawUpdateTime;
+        } else if (typeof rawUpdateTime === 'string' || typeof rawUpdateTime === 'number') {
+            const parsed = new Date(rawUpdateTime);
+            if (!isNaN(parsed.getTime())) {
+                updateTime = parsed;
+            }
+        }
+
+        return { data, updateTime };
     }
 
     private static async updateRecordViaHttp(sql: HttpSql, profile: Profile, data: string): Promise<void> {
@@ -104,16 +121,16 @@ export class DatabaseService {
         await sql.query(query, [profile.id, data]);
     }
 
-    static async fetchRecord(profile: Profile): Promise<string | null> {
+    static async fetchRecordWithMeta(profile: Profile): Promise<{ data: string | null; updateTime: Date | null }> {
         if (!this.validateTableName(profile.tableName)) {
             throw new Error(`Invalid table name: "${profile.tableName}". Only letters, numbers, and underscores are allowed.`);
         }
 
         try {
             const sql = await this.getSql();
-            return await this.fetchRecordViaHttp(sql, profile);
+            return await this.fetchRecordWithMetaViaHttp(sql, profile);
         } catch (error) {
-            console.error('Error fetching record:', error);
+            console.error('Error fetching record with meta:', error);
             throw error;
         }
     }
