@@ -329,6 +329,13 @@ export class MultiSyncManager {
                 item.remoteContent
             );
 
+            // The diff editor has been closed by confirm/cancel; release the lock
+            // before any follow-up render so the banner and other rows' buttons
+            // reflect the unlocked state. Otherwise removeItem + onItemsChanged
+            // below re-render with the stale lock, leaving "Diff open for X"
+            // stuck on the panel even after the profile has been synced away.
+            this.activeDiffProfile = null;
+
             if (result.outcome === 'confirmed') {
                 // Direction may have flipped inside the diff via the swap icon — trust what the diff returned.
                 item.direction = result.direction;

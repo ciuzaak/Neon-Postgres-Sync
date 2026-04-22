@@ -2,6 +2,13 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.5.1] - 2026-04-23
+### Fixed
+- **Multi-Profile Sync**: After confirming a diff, the "Diff open for <name>" banner and the disabled state on the remaining profile rows stayed stuck on the panel because the lock was cleared after the post-confirm render. The lock is now released before the follow-up render
+
+### Changed
+- **MRU Ordering**: Profiles chosen inside the multi-select picker no longer get promoted in the main picker's MRU order. Only the `Sync Multiple Profiles…` entry itself is MRU-tracked, so triggering a multi-sync no longer reshuffles the individual profiles above it
+
 ## [0.5.0] - 2026-04-22
 ### Added
 - **Multi-Profile Sync**: New `Sync Multiple Profiles…` entry in the picker opens a batch page showing each profile's direction, added/removed line counts, and per-row Swap / Diff / Confirm controls. The entry's position in the picker is ordered by usage frequency alongside the profiles

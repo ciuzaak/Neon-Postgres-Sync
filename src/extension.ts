@@ -204,9 +204,11 @@ export function activate(context: vscode.ExtensionContext) {
             await recordUsage(MULTI_SELECT_KEY, profiles);
             const picks = await pickMultipleProfiles(profiles);
             if (!picks) return;
-            for (const p of picks) {
-                await recordUsage(p.name, profiles);
-            }
+            // Deliberately do NOT record usage for each picked profile — only the
+            // "Multiple" entry itself is MRU-tracked. This keeps the inner picker's
+            // order stable across runs (otherwise every multi-sync would shuffle
+            // the individual profiles to the top) and matches the UX: "Multiple"
+            // is the action the user picked, not each constituent profile.
             await MultiSyncManager.start(picks.map((p) => p.name));
             return;
         }
