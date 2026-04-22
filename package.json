@@ -2,7 +2,7 @@
   "name": "neon-postgres-sync",
   "displayName": "Neon Postgres Sync",
   "description": "Sync local files with Neon Postgres records (Text-based)",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "ciuzaak",
   "icon": "images/icon.png",
   "repository": {
@@ -49,6 +49,10 @@
       {
         "command": "neonSync.openSettings",
         "title": "Neon Sync: Open Settings"
+      },
+      {
+        "command": "neonSync.multiPickerSelectAll",
+        "title": "Neon Sync: Toggle Select All (Multi-Profile Picker)"
       }
     ],
     "menus": {
@@ -81,6 +85,10 @@
         {
           "command": "neonSync.cancelSync",
           "when": "neonSync.isSyncing"
+        },
+        {
+          "command": "neonSync.multiPickerSelectAll",
+          "when": "false"
         }
       ]
     },
@@ -98,6 +106,11 @@
         "command": "neonSync.swapSyncDirection",
         "key": "Alt+S",
         "when": "neonSync.isSyncing"
+      },
+      {
+        "command": "neonSync.multiPickerSelectAll",
+        "key": "Alt+A",
+        "when": "neonSync.multiPickerActive"
       }
     ]
   },

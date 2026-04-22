@@ -2,6 +2,17 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.5.0] - 2026-04-22
+### Added
+- **Multi-Profile Sync**: New `Sync Multiple Profiles…` entry in the picker opens a batch page showing each profile's direction, added/removed line counts, and per-row Swap / Diff / Confirm controls. The entry's position in the picker is ordered by usage frequency alongside the profiles
+- **Select All Shortcut**: In the multi-profile picker, `Alt+A` or the title-bar Select All button toggles every profile on/off (scoped to the current search filter); placeholder text surfaces the hint
+- **Batched Connection**: The batch page fetches all selected profiles in a single HTTP transaction via `@neondatabase/serverless` and commits `Confirm All` uploads in one atomic transaction, replacing the previous one-request-per-profile round-trips
+- **Partial-Failure Recovery**: When a `Confirm All` upload batch commits remotely but a later local write fails, the affected rows stay visible with a `remote committed` badge so a retry only re-runs the local write — no duplicate DB commits, no stale candidate bytes
+- **Skip / Summary Notifications**: Identical profiles are skipped with a notification instead of opening the page; missing-both profiles are called out separately; when the last pending row is confirmed the page auto-closes with a summary
+
+### Changed
+- `SyncManager` now supports an external caller (the multi-sync page) that drives diff sessions and applies persistence itself, while the single-profile flow keeps its existing behavior
+
 ## [0.4.0] - 2026-04-21
 ### Added
 - **Unified Sync Command**: Single `Neon Sync: Sync File` command compares local file `mtime` with remote `update_time` and auto-picks a direction when the gap is clearly ≥ 5 seconds

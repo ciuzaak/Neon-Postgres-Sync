@@ -5,7 +5,8 @@ import * as os from 'os';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
 
-type SyncDirection = 'download' | 'upload';
+export type SyncDirection = 'download' | 'upload';
+export type SyncOutcome = 'confirmed' | 'cancelled';
 
 // Local mtime (OS clock) and remote update_time (DB server clock) can drift.
 // Treat any gap smaller than this as ambiguous and warn the user to verify direction.
@@ -19,6 +20,11 @@ interface SyncSession {
     candidateUri: vscode.Uri; // Right side of diff — the editable/target content
     tempFiles: string[];
     editorCloseDisposable?: vscode.Disposable;
+    // When set, the sync is driven by an external caller (e.g. multi-sync panel).
+    // The caller receives the outcome and takes over the persistence side-effects
+    // (updating local files / issuing DB writes), so the default flow should skip them.
+    externalResolver?: (outcome: SyncOutcome, candidateContent: string, direction: SyncDirection) => void;
+    resolved?: boolean;
 }
 
 export class SyncManager {
@@ -45,9 +51,23 @@ export class SyncManager {
 
             // If the diff editor was closed (candidate file no longer visible)
             if (!isStillOpen) {
+                this.resolveSession('cancelled', '');
                 void this.cleanupSession(false); // Don't close editor, it's already closed
             }
         });
+    }
+
+    private static resolveSession(outcome: SyncOutcome, candidateContent: string): void {
+        const session = this.currentSession;
+        if (!session || session.resolved) return;
+        session.resolved = true;
+        if (session.externalResolver) {
+            try {
+                session.externalResolver(outcome, candidateContent, session.direction);
+            } catch (e) {
+                console.error('External sync resolver threw:', e);
+            }
+        }
     }
 
     static async startSync(profileName: string) {
@@ -116,6 +136,36 @@ export class SyncManager {
         );
     }
 
+    /**
+     * Open a diff session with pre-fetched local/remote content. Used by the
+     * multi-profile sync panel: data is already loaded and direction already
+     * chosen, so we skip the progress indicator, the identical-content early
+     * return and the ambiguity prompt. Resolves once the user confirms, cancels
+     * or closes the diff editor.
+     */
+    static openDiffForExternal(
+        profile: Profile,
+        direction: SyncDirection,
+        localContent: string,
+        remoteContent: string
+    ): Promise<{ outcome: SyncOutcome; candidateContent: string; direction: SyncDirection }> {
+        if (this.currentSession) {
+            return Promise.reject(new Error('Another sync session is already active.'));
+        }
+
+        return new Promise((resolve, reject) => {
+            const resolver = (outcome: SyncOutcome, candidateContent: string, finalDirection: SyncDirection) => {
+                resolve({ outcome, candidateContent, direction: finalDirection });
+            };
+
+            this.openDiff(profile, direction, localContent, remoteContent, {
+                externalResolver: resolver,
+                skipDefaultPersist: true,
+                suppressInfoMessages: true
+            }).catch(reject);
+        });
+    }
+
     static async swapSyncDirection() {
         if (!this.currentSession) {
             vscode.window.showErrorMessage('No active sync session.');
@@ -137,13 +187,17 @@ export class SyncManager {
             if (choice !== 'Swap and Discard') return;
         }
 
-        const { profile, originalLocal, originalRemote } = session;
+        const { profile, originalLocal, originalRemote, externalResolver } = session;
         const newDirection: SyncDirection = session.direction === 'download' ? 'upload' : 'download';
 
         this.isSwapping = true;
         try {
             await this.cleanupSession(true);
-            await this.openDiff(profile, newDirection, originalLocal, originalRemote);
+            await this.openDiff(profile, newDirection, originalLocal, originalRemote, {
+                externalResolver,
+                skipDefaultPersist: externalResolver !== undefined,
+                suppressInfoMessages: externalResolver !== undefined
+            });
         } finally {
             this.isSwapping = false;
         }
@@ -180,7 +234,7 @@ export class SyncManager {
         return choice === downloadLabel ? 'download' : 'upload';
     }
 
-    private static decideSyncDirection(
+    static decideSyncDirection(
         localExists: boolean,
         remoteExists: boolean,
         localMtime: Date | null,
@@ -228,7 +282,12 @@ export class SyncManager {
         profile: Profile,
         direction: SyncDirection,
         localContent: string,
-        remoteContent: string
+        remoteContent: string,
+        options: {
+            externalResolver?: SyncSession['externalResolver'];
+            skipDefaultPersist?: boolean;
+            suppressInfoMessages?: boolean;
+        } = {}
     ): Promise<void> {
         const languageId = await this.getLanguageIdForFile(profile.filePath);
         const ext = path.extname(profile.filePath) || '.txt';
@@ -267,7 +326,9 @@ export class SyncManager {
             originalRemote: remoteContent,
             candidateUri: rightUri,
             tempFiles: [leftPath, rightPath],
-            editorCloseDisposable: this.registerEditorCloseListener()
+            editorCloseDisposable: this.registerEditorCloseListener(),
+            externalResolver: options.externalResolver,
+            resolved: false
         };
 
         await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
@@ -280,6 +341,7 @@ export class SyncManager {
             return;
         }
 
+        const session = this.currentSession;
         let candidateContent = '';
 
         try {
@@ -287,7 +349,7 @@ export class SyncManager {
             // The user might have edited it in the diff editor.
             // We need to read from the document if it's open and dirty, or from disk.
             // Best way is to find the open text document for the uri.
-            const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === this.currentSession!.candidateUri.toString());
+            const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === session.candidateUri.toString());
 
             if (doc) {
                 if (doc.isDirty) {
@@ -295,16 +357,16 @@ export class SyncManager {
                 }
                 candidateContent = doc.getText();
             } else {
-                if (fs.existsSync(this.currentSession.candidateUri.fsPath)) {
-                    candidateContent = fs.readFileSync(this.currentSession.candidateUri.fsPath, 'utf-8');
+                if (fs.existsSync(session.candidateUri.fsPath)) {
+                    candidateContent = fs.readFileSync(session.candidateUri.fsPath, 'utf-8');
                 }
             }
 
             if (!candidateContent || candidateContent.trim() === '') {
                 // If empty, it might be because the file was closed or not found.
                 // Try reading from disk again as a fallback if doc was not found
-                if (fs.existsSync(this.currentSession.candidateUri.fsPath)) {
-                    candidateContent = fs.readFileSync(this.currentSession.candidateUri.fsPath, 'utf-8');
+                if (fs.existsSync(session.candidateUri.fsPath)) {
+                    candidateContent = fs.readFileSync(session.candidateUri.fsPath, 'utf-8');
                 }
             }
 
@@ -313,20 +375,19 @@ export class SyncManager {
                 return;
             }
 
-            const localFilePath = this.resolvePath(this.currentSession.profile.filePath);
-
-            if (this.currentSession.direction === 'download') {
-                fs.writeFileSync(localFilePath, candidateContent);
-                vscode.window.showInformationMessage(`Downloaded and saved to ${this.currentSession.profile.filePath}`);
+            if (session.externalResolver) {
+                this.resolveSession('confirmed', candidateContent);
             } else {
-                // Upload: Save Candidate (Right/Local) to DB
-                // We save the raw text to DB
-                await DatabaseService.updateRecord(this.currentSession.profile, candidateContent);
+                const localFilePath = this.resolvePath(session.profile.filePath);
 
-                // Also update local file to match the candidate
-                fs.writeFileSync(localFilePath, candidateContent);
-
-                vscode.window.showInformationMessage(`Uploaded ${this.currentSession.profile.name} to database and updated local file.`);
+                if (session.direction === 'download') {
+                    fs.writeFileSync(localFilePath, candidateContent);
+                    vscode.window.showInformationMessage(`Downloaded and saved to ${session.profile.filePath}`);
+                } else {
+                    await DatabaseService.updateRecord(session.profile, candidateContent);
+                    fs.writeFileSync(localFilePath, candidateContent);
+                    vscode.window.showInformationMessage(`Uploaded ${session.profile.name} to database and updated local file.`);
+                }
             }
 
         } catch (error: any) {
@@ -341,7 +402,11 @@ export class SyncManager {
         if (!this.currentSession) {
             return;
         }
-        vscode.window.showInformationMessage('Sync cancelled.');
+        const session = this.currentSession;
+        if (!session.externalResolver) {
+            vscode.window.showInformationMessage('Sync cancelled.');
+        }
+        this.resolveSession('cancelled', '');
         await this.cleanupSession(true);
     }
 
@@ -376,7 +441,7 @@ export class SyncManager {
         await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', false);
     }
 
-    private static resolvePath(filePath: string): string {
+    static resolvePath(filePath: string): string {
         if (path.isAbsolute(filePath)) {
             return filePath;
         }

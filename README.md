@@ -5,6 +5,7 @@ Sync local files with Neon Postgres records. This extension allows you to upload
 ## Features
 
 -   **One-Command Sync**: A single `Sync File` command auto-picks direction by comparing local file `mtime` with the remote `update_time`. When the timestamps are too close to trust (within 5s) or either side is missing a timestamp, it pauses and asks you to pick the direction explicitly.
+-   **Multi-Profile Sync**: Pick `Sync Multiple Profiles…` from the same picker to open a batch page listing each selected profile's direction and added/removed line counts. Adjust direction, open a diff, confirm individually, or hit `Confirm All` to commit every pending row in a single atomic transaction. `Alt+A` toggles select-all in the multi-pick (respects the active search).
 -   **Manual Direction Override**: Click the `⇄` icon in the diff title bar (or press `Alt+S`) to flip the sync direction mid-review. Candidate-side edits (saved or unsaved) are protected with a confirmation before being discarded.
 -   **Text-based Sync**: Preserves comments, whitespace, and formatting in your files.
 -   **Interactive Diff**: Review changes (and edit the candidate side) before confirming with `Alt+Enter`.
@@ -77,6 +78,14 @@ Example `neon-sync.json`:
     If the timestamps are ambiguous (see below), a modal asks you to pick `Download (Local ← Remote)` or `Upload (Remote ← Local)` first; dismissing the modal aborts the sync.
 3. Optionally edit the right-hand side of the diff to fine-tune the final content.
 4. Confirm with `Alt+Enter` (or the `✓` button), press the `⇄` button / `Alt+S` to flip direction before confirming, or click the `✕` button to cancel.
+
+### Syncing multiple profiles
+
+1. Run `Neon Sync: Sync File` and pick `Sync Multiple Profiles…` from the list (its position floats up as you use it).
+2. Check the profiles you want to sync (Space toggles, `Alt+A` toggles select-all for whatever matches the current search).
+3. The batch page fetches all selected records in a single HTTP transaction and lists every row that still needs syncing with its proposed direction and `+added / -removed` line counts. Identical profiles are skipped with a notification; missing-both profiles are called out separately.
+4. Per row you can `Swap` the direction, open a `Diff` (same editor as single-profile sync), or `Confirm` just that row. `Confirm All` commits every upload in a single atomic transaction, then writes the local files.
+5. If a local write fails after a successful remote commit, the affected row stays visible with a `remote committed` badge so a retry only re-runs the local write — it won't re-upload or bump `update_time`.
 
 ### Auto-direction rules
 
