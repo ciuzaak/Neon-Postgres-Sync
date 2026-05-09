@@ -139,7 +139,7 @@ export class ConfigManager {
             const config = this.readConfig();
             if (config && config.connectionString) {
                 delete config.connectionString;
-                fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+                this.atomicWriteJson(configPath, config);
             }
         }
     }
@@ -156,7 +156,23 @@ export class ConfigManager {
             config = this.readConfig() || { profiles: [] };
         }
         config.profiles = profiles;
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        this.atomicWriteJson(configPath, config);
+    }
+
+    /**
+     * Write JSON to a sibling temp file then rename into place. Prevents
+     * leaving the config truncated/empty if the process is killed mid-write.
+     */
+    private static atomicWriteJson(targetPath: string, value: unknown): void {
+        const tempPath = `${targetPath}.${process.pid}.tmp`;
+        fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
+        try {
+            fs.renameSync(tempPath, targetPath);
+        } catch (error) {
+            // Best-effort cleanup; rethrow so callers see the failure.
+            try { fs.unlinkSync(tempPath); } catch { /* swallow */ }
+            throw error;
+        }
     }
 
     static async openConfigFile(): Promise<void> {

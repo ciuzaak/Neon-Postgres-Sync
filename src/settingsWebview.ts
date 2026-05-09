@@ -53,6 +53,12 @@ export class SettingsPanel {
             column ?? vscode.ViewColumn.One,
             {
                 enableScripts: true,
+                // Keeps the script mounted while hidden so _settingsLoaded
+                // remains accurate across panel hide/reveal cycles. Without
+                // this, VS Code may dispose and recreate the webview script,
+                // and a focus option arriving in that window would race the
+                // new script's listener.
+                retainContextWhenHidden: true,
                 localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')]
             }
         );
@@ -216,8 +222,8 @@ export class SettingsPanel {
         if (typeof currentValue === 'string' && currentValue.trim()) {
             const value = currentValue.trim();
             const absolute = path.isAbsolute(value)
-                ? value
-                : workspaceRoot ? path.join(workspaceRoot, value) : undefined;
+                ? path.resolve(value)
+                : workspaceRoot ? path.resolve(workspaceRoot, value) : undefined;
             if (absolute) return vscode.Uri.file(absolute);
         }
         return workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined;
