@@ -29,11 +29,12 @@ export interface MockVscode {
         showErrorMessage: (message: string, ...items: unknown[]) => Promise<unknown>;
         withProgress: <T>(options: unknown, task: () => Thenable<T> | T) => Promise<T>;
         onDidChangeVisibleTextEditors: (listener: unknown) => { dispose: () => void };
-        createWebviewPanel: () => unknown;
+        createWebviewPanel: (...args: unknown[]) => MockWebviewPanel;
         showQuickPick: () => Promise<undefined>;
         createQuickPick: () => unknown;
         showInputBox: () => Promise<undefined>;
         showTextDocument: () => Promise<undefined>;
+        showOpenDialog: (options?: unknown) => Promise<Array<{ fsPath: string }> | undefined>;
         activeTextEditor: undefined;
     };
     workspace: {
@@ -45,6 +46,59 @@ export interface MockVscode {
         setTextDocumentLanguage: (doc: unknown, languageId: string) => Promise<unknown>;
     };
     ViewColumn: { One: number; Active: number };
+    __pendingWebviewPanel?: MockWebviewPanel;
+}
+
+export interface MockWebview {
+    postedMessages: unknown[];
+    listeners: Array<(message: unknown) => unknown>;
+    html: string;
+    postMessage: (message: unknown) => Promise<boolean>;
+    onDidReceiveMessage: (
+        listener: (message: unknown) => unknown,
+        thisArg?: unknown,
+        disposables?: Array<{ dispose: () => void }>
+    ) => { dispose: () => void };
+    asWebviewUri: (uri: { fsPath: string }) => { fsPath: string; toString: () => string };
+}
+
+export interface MockWebviewPanel {
+    webview: MockWebview;
+    revealCalls: number;
+    disposed: boolean;
+    reveal: (column?: number) => void;
+    onDidDispose: (
+        listener: () => void,
+        thisArg?: unknown,
+        disposables?: Array<{ dispose: () => void }>
+    ) => { dispose: () => void };
+    dispose: () => void;
+}
+
+export function createMockWebviewPanel(): MockWebviewPanel {
+    const webview: MockWebview = {
+        postedMessages: [],
+        listeners: [],
+        html: '',
+        async postMessage(message: unknown): Promise<boolean> {
+            webview.postedMessages.push(message);
+            return true;
+        },
+        onDidReceiveMessage(listener) {
+            webview.listeners.push(listener);
+            return { dispose() { /* no-op */ } };
+        },
+        asWebviewUri: (uri) => ({ fsPath: uri.fsPath, toString: () => `vscode-resource://${uri.fsPath}` })
+    };
+    const panel: MockWebviewPanel = {
+        webview,
+        revealCalls: 0,
+        disposed: false,
+        reveal() { panel.revealCalls += 1; },
+        onDidDispose() { return { dispose() { /* no-op */ } }; },
+        dispose() { panel.disposed = true; }
+    };
+    return panel;
 }
 
 export interface MockSql {
@@ -193,8 +247,10 @@ function createVscodeMock(): MockVscode {
                 return await task();
             },
             onDidChangeVisibleTextEditors: () => new Disposable(),
-            createWebviewPanel: () => {
-                throw new Error('createWebviewPanel is not implemented in the test mock.');
+            createWebviewPanel: (..._args: unknown[]): MockWebviewPanel => {
+                const pending = vscode.__pendingWebviewPanel;
+                vscode.__pendingWebviewPanel = undefined;
+                return pending ?? createMockWebviewPanel();
             },
             showQuickPick: async () => undefined,
             createQuickPick: () => {
@@ -202,6 +258,7 @@ function createVscodeMock(): MockVscode {
             },
             showInputBox: async () => undefined,
             showTextDocument: async () => undefined,
+            showOpenDialog: async () => undefined,
             activeTextEditor: undefined
         },
         workspace: {
