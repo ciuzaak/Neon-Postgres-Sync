@@ -54,7 +54,8 @@ export class DatabaseService {
     private static async getConnectionString(): Promise<string> {
         const connectionString = await ConfigManager.getConnectionString();
         if (!connectionString) {
-            throw new Error('PostgreSQL connection string is not configured. Please run "Neon Sync: Configure Connection URL".');
+            void ConfigManager.promptMissingConnectionString();
+            throw new Error('PostgreSQL connection string is not configured.');
         }
         return connectionString.trim();
     }

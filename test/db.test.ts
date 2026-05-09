@@ -57,6 +57,29 @@ test('updateRecord rejects unsafe table names before creating a database client'
     assert.deepEqual(neon.calls, []);
 });
 
+test('updateRecord triggers the missing-URL prompt and throws when no connection is configured', async () => {
+    const { vscode, neon } = resetMocks();
+    const { ConfigManager, DatabaseService } = loadModules();
+    const secrets = new Map<string, string>();
+    ConfigManager.initialize({
+        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`)),
+        secrets: {
+            get: async (key: string) => secrets.get(key),
+            store: async (key: string, value: string) => { secrets.set(key, value); },
+            delete: async (key: string) => { secrets.delete(key); }
+        }
+    } as never);
+
+    await assert.rejects(
+        DatabaseService.updateRecord(profile(), '{}'),
+        /^Error: PostgreSQL connection string is not configured\.$/
+    );
+    assert.deepEqual(vscode.window.errorMessages, [
+        'PostgreSQL connection string is not configured.'
+    ]);
+    assert.deepEqual(neon.calls, []);
+});
+
 test('fetchRecordWithMeta queries by id and parses object data and string update_time', async () => {
     const { DatabaseService, neon } = await configureConnection('  postgres://example  ');
     const sql = createMockSql();
