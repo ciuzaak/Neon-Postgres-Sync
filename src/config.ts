@@ -98,6 +98,14 @@ export class ConfigManager {
         }
     }
 
+    static async clearConnectionString(): Promise<void> {
+        if (this.secrets) {
+            await this.secrets.delete(this.SECRET_KEY);
+        }
+        await this.removeConnectionStringFromFile();
+        this.notifyConnectionStringChanged();
+    }
+
     static onConnectionStringChanged(listener: () => void): vscode.Disposable {
         this.connectionStringListeners.add(listener);
         return new vscode.Disposable(() => {

@@ -12,6 +12,7 @@ interface SecretMock {
     values: Map<string, string>;
     get: (key: string) => Promise<string | undefined>;
     store: (key: string, value: string) => Promise<void>;
+    delete: (key: string) => Promise<void>;
 }
 
 function createSecretMock(): SecretMock {
@@ -23,6 +24,9 @@ function createSecretMock(): SecretMock {
         },
         async store(key: string, value: string): Promise<void> {
             values.set(key, value);
+        },
+        async delete(key: string): Promise<void> {
+            values.delete(key);
         }
     };
 }
@@ -100,4 +104,26 @@ test('setConnectionString stores the value in SecretStorage and notifies listene
 
     assert.equal(secrets.values.get('neonSync.connectionString'), 'postgres://newer');
     assert.equal(notificationCount, 1);
+});
+
+test('clearConnectionString deletes the secret, removes any legacy file value, and notifies listeners', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const configPath = path.join(storagePath, 'neon-sync.json');
+    fs.writeFileSync(
+        configPath,
+        JSON.stringify({ connectionString: 'postgres://legacy', profiles: [] }, null, 2)
+    );
+    const secrets = createSecretMock();
+    secrets.values.set('neonSync.connectionString', 'postgres://stored');
+    const { ConfigManager } = initConfig(storagePath, secrets);
+    let notifications = 0;
+    ConfigManager.onConnectionStringChanged(() => { notifications += 1; });
+
+    await ConfigManager.clearConnectionString();
+
+    assert.equal(secrets.values.has('neonSync.connectionString'), false);
+    const rewritten = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as ConfigFile;
+    assert.equal(rewritten.connectionString, undefined);
+    assert.equal(notifications, 1);
+    assert.equal(await ConfigManager.getConnectionString(), undefined);
 });
