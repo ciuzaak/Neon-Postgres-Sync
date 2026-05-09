@@ -233,9 +233,12 @@ export function activate(context: vscode.ExtensionContext) {
         await ConfigManager.openConfigFile();
     });
 
-    const openSettingsDisposable = vscode.commands.registerCommand('neonSync.openSettings', () => {
-        SettingsPanel.createOrShow(context.extensionUri);
-    });
+    const openSettingsDisposable = vscode.commands.registerCommand(
+        'neonSync.openSettings',
+        (options?: { focus?: 'connection' }) => {
+            SettingsPanel.createOrShow(context.extensionUri, options);
+        }
+    );
 
     const multiPickerSelectAllDisposable = vscode.commands.registerCommand(
         'neonSync.multiPickerSelectAll',

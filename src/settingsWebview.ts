@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
 import { ConfigManager, Profile } from './config';
 
+export interface SettingsPanelOptions {
+    focus?: 'connection';
+}
+
 export class SettingsPanel {
     public static currentPanel: SettingsPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private readonly _disposables: vscode.Disposable[] = [];
+    private _pendingFocus: 'connection' | undefined;
 
     private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
         this._panel = panel;
@@ -13,13 +18,14 @@ export class SettingsPanel {
         this._setWebviewMessageListener(this._panel.webview);
     }
 
-    public static createOrShow(extensionUri: vscode.Uri) {
+    public static createOrShow(extensionUri: vscode.Uri, options?: SettingsPanelOptions) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
 
         if (SettingsPanel.currentPanel) {
             SettingsPanel.currentPanel._panel.reveal(column);
+            SettingsPanel.currentPanel._applyFocusOption(options);
             return;
         }
 
@@ -34,6 +40,16 @@ export class SettingsPanel {
         );
 
         SettingsPanel.currentPanel = new SettingsPanel(panel, extensionUri);
+        SettingsPanel.currentPanel._applyFocusOption(options);
+    }
+
+    private _applyFocusOption(options?: SettingsPanelOptions): void {
+        if (!options?.focus) return;
+        this._pendingFocus = options.focus;
+        // The webview may not have asked for settings yet. We post once now;
+        // when the webview sends getSettings we re-apply this hint after the
+        // loadSettings reply, so focus survives the script's mount race.
+        void this._panel.webview.postMessage({ command: 'focusField', field: options.focus });
     }
 
     public dispose() {
@@ -57,11 +73,15 @@ export class SettingsPanel {
                     case 'getSettings':
                         const connectionString = await ConfigManager.getConnectionString();
                         const profiles = ConfigManager.getProfiles();
-                        webview.postMessage({
+                        await webview.postMessage({
                             command: 'loadSettings',
                             connectionString: connectionString || '',
                             profiles: profiles
                         });
+                        if (this._pendingFocus) {
+                            await webview.postMessage({ command: 'focusField', field: this._pendingFocus });
+                            this._pendingFocus = undefined;
+                        }
                         break;
                     case 'saveSettings':
                         const { connectionString: newUrl, profiles: newProfiles } = message.data;
