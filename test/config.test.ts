@@ -106,6 +106,34 @@ test('setConnectionString stores the value in SecretStorage and notifies listene
     assert.equal(notificationCount, 1);
 });
 
+test('promptMissingConnectionString shows an error toast with an Open Settings button', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const { ConfigManager, vscode } = initConfig(storagePath);
+
+    await ConfigManager.promptMissingConnectionString();
+
+    assert.deepEqual(vscode.window.errorMessages, [
+        'PostgreSQL connection string is not configured.'
+    ]);
+    assert.deepEqual(
+        vscode.commands.executed,
+        [{ command: 'neonSync.openSettings', args: [{ focus: 'connection' }] }]
+    );
+});
+
+test('promptMissingConnectionString does not open settings when the user dismisses the toast', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const { ConfigManager, vscode } = initConfig(storagePath);
+    vscode.window.showErrorMessage = async (message: string) => {
+        vscode.window.errorMessages.push(message);
+        return undefined;
+    };
+
+    await ConfigManager.promptMissingConnectionString();
+
+    assert.deepEqual(vscode.commands.executed, []);
+});
+
 test('clearConnectionString deletes the secret, removes any legacy file value, and notifies listeners', async () => {
     const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
     const configPath = path.join(storagePath, 'neon-sync.json');

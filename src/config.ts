@@ -106,6 +106,16 @@ export class ConfigManager {
         this.notifyConnectionStringChanged();
     }
 
+    static async promptMissingConnectionString(): Promise<void> {
+        const choice = await vscode.window.showErrorMessage(
+            'PostgreSQL connection string is not configured.',
+            'Open Settings'
+        );
+        if (choice === 'Open Settings') {
+            await vscode.commands.executeCommand('neonSync.openSettings', { focus: 'connection' });
+        }
+    }
+
     static onConnectionStringChanged(listener: () => void): vscode.Disposable {
         this.connectionStringListeners.add(listener);
         return new vscode.Disposable(() => {
