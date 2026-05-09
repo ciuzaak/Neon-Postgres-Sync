@@ -54,7 +54,9 @@ export class DatabaseService {
     private static async getConnectionString(): Promise<string> {
         const connectionString = await ConfigManager.getConnectionString();
         if (!connectionString) {
-            void ConfigManager.promptMissingConnectionString();
+            ConfigManager.promptMissingConnectionString().catch((error) => {
+                console.error('Failed to surface missing-URL prompt:', error);
+            });
             throw new Error('PostgreSQL connection string is not configured.');
         }
         return connectionString.trim();

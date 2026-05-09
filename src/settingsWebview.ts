@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import { ConfigManager, Profile } from './config';
 import {
@@ -18,11 +19,17 @@ interface SaveProfileMessage {
     originalName?: string;
 }
 
+interface PickFilePathMessage {
+    command: 'pickFilePath';
+    currentValue?: string;
+}
+
 export class SettingsPanel {
     public static currentPanel: SettingsPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private readonly _disposables: vscode.Disposable[] = [];
     private _pendingFocus: 'connection' | undefined;
+    private _settingsLoaded = false;
 
     private constructor(panel: vscode.WebviewPanel, _extensionUri: vscode.Uri) {
         this._panel = panel;
@@ -64,11 +71,16 @@ export class SettingsPanel {
 
     private _applyFocusOption(options?: SettingsPanelOptions): void {
         if (!options?.focus) return;
+        if (this._settingsLoaded) {
+            // The script is mounted and already has its message listener; post
+            // directly so re-opening with focus on an existing panel works.
+            void this._panel.webview.postMessage({ command: 'focusField', field: options.focus });
+            return;
+        }
+        // First open: wait for the script to send getSettings, then re-emit
+        // focus after the loadSettings reply. Posting now would race the
+        // listener mount and either steal focus later or be lost.
         this._pendingFocus = options.focus;
-        // The webview may not have asked for settings yet. Post once now; if
-        // the script is still mounting, the listener will re-emit after the
-        // initial loadSettings reply (see _handleGetSettings).
-        void this._panel.webview.postMessage({ command: 'focusField', field: options.focus });
     }
 
     private _setWebviewMessageListener(webview: vscode.Webview): void {
@@ -92,15 +104,25 @@ export class SettingsPanel {
                         await this._handleDeleteProfile(webview, message.name);
                         break;
                     case 'pickFilePath':
-                        await webview.postMessage(await this._handlePickFilePath());
+                        await webview.postMessage(await this._handlePickFilePath(message as PickFilePathMessage));
                         break;
                 }
             } catch (error) {
                 console.error('Settings webview handler error:', error);
-                await webview.postMessage({
-                    command: 'genericError',
-                    error: (error as Error)?.message ?? 'Unknown error'
-                });
+                const errorMessage = (error as Error)?.message ?? 'Unknown error';
+                if (message?.command === 'saveProfile') {
+                    await webview.postMessage({
+                        command: 'profileSaveError',
+                        errors: {},
+                        formError: `Failed to save profile: ${errorMessage}`,
+                        originalName: (message as SaveProfileMessage).originalName
+                    });
+                } else {
+                    await webview.postMessage({
+                        command: 'genericError',
+                        error: errorMessage
+                    });
+                }
             }
         }, undefined, this._disposables);
     }
@@ -112,6 +134,7 @@ export class SettingsPanel {
             connectionString: connectionString ?? '',
             profiles: ConfigManager.getProfiles()
         });
+        this._settingsLoaded = true;
         if (this._pendingFocus) {
             await webview.postMessage({ command: 'focusField', field: this._pendingFocus });
             this._pendingFocus = undefined;
@@ -167,20 +190,21 @@ export class SettingsPanel {
         await webview.postMessage({ command: 'profilesSaved', profiles });
     }
 
-    private async _handlePickFilePath(): Promise<unknown> {
+    private async _handlePickFilePath(message: PickFilePathMessage): Promise<unknown> {
+        const folders = vscode.workspace.workspaceFolders;
+        const workspaceRoot = folders && folders.length > 0 ? folders[0].uri.fsPath : undefined;
         const result = await vscode.window.showOpenDialog({
             canSelectFiles: true,
             canSelectFolders: false,
-            canSelectMany: false
+            canSelectMany: false,
+            defaultUri: this._resolveDefaultUri(message.currentValue, workspaceRoot)
         });
         if (!result || result.length === 0) {
             return { command: 'filePathPicked', path: null };
         }
         const chosen = result[0].fsPath;
-        const folders = vscode.workspace.workspaceFolders;
-        if (folders && folders.length > 0) {
-            const root = folders[0].uri.fsPath;
-            const rel = path.relative(root, chosen);
+        if (workspaceRoot) {
+            const rel = path.relative(workspaceRoot, chosen);
             if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
                 return { command: 'filePathPicked', path: rel };
             }
@@ -188,8 +212,23 @@ export class SettingsPanel {
         return { command: 'filePathPicked', path: chosen };
     }
 
-    private _getHtmlForWebview(_webview: vscode.Webview): string {
-        return getSettingsHtml({ validatorRegex: PROFILE_TABLENAME_REGEX_SOURCE });
+    private _resolveDefaultUri(currentValue: unknown, workspaceRoot?: string): vscode.Uri | undefined {
+        if (typeof currentValue === 'string' && currentValue.trim()) {
+            const value = currentValue.trim();
+            const absolute = path.isAbsolute(value)
+                ? value
+                : workspaceRoot ? path.join(workspaceRoot, value) : undefined;
+            if (absolute) return vscode.Uri.file(absolute);
+        }
+        return workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined;
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview): string {
+        return getSettingsHtml({
+            validatorRegex: PROFILE_TABLENAME_REGEX_SOURCE,
+            nonce: crypto.randomBytes(16).toString('base64'),
+            cspSource: webview.cspSource
+        });
     }
 }
 
@@ -676,7 +715,7 @@ const SETTINGS_SCRIPT = `
         els.pmFormError.textContent = '';
     }
 
-    function applyErrors(errors) {
+    function applyErrors(errors, formError) {
         clearFormErrors();
         const map = {
             name: els.pmName,
@@ -686,7 +725,7 @@ const SETTINGS_SCRIPT = `
         };
         let any = false;
         for (const key of Object.keys(map)) {
-            const msg = errors[key];
+            const msg = errors && errors[key];
             if (!msg) continue;
             any = true;
             map[key].classList.add('ns-input--error');
@@ -696,7 +735,10 @@ const SETTINGS_SCRIPT = `
                 node.hidden = false;
             }
         }
-        if (any) {
+        if (formError) {
+            els.pmFormError.textContent = formError;
+            els.pmFormError.hidden = false;
+        } else if (any) {
             els.pmFormError.textContent = 'Please fix the errors below.';
             els.pmFormError.hidden = false;
         }
@@ -750,7 +792,7 @@ const SETTINGS_SCRIPT = `
     });
 
     els.pmBrowse.addEventListener('click', () => {
-        vscode.postMessage({ command: 'pickFilePath' });
+        vscode.postMessage({ command: 'pickFilePath', currentValue: els.pmFilePath.value });
     });
 
     // ---- Global keys ----
@@ -787,7 +829,7 @@ const SETTINGS_SCRIPT = `
                 closeProfileModal(true);
                 break;
             case 'profileSaveError':
-                applyErrors(msg.errors || {});
+                applyErrors(msg.errors || {}, msg.formError);
                 break;
             case 'filePathPicked':
                 if (msg.path) {
@@ -811,7 +853,7 @@ const SETTINGS_SCRIPT = `
 }());
 `;
 
-function getSettingsHtml(ctx: { validatorRegex: string }): string {
+function getSettingsHtml(ctx: { validatorRegex: string; nonce: string; cspSource: string }): string {
     // Use function-form replace so $ in the regex source isn't interpreted as a
     // back-reference. JSON.stringify produces a valid JS string literal that
     // round-trips backslashes safely (the source uses \. which a naïve substitution
@@ -820,17 +862,24 @@ function getSettingsHtml(ctx: { validatorRegex: string }): string {
         '"__VALIDATOR_REGEX__"',
         () => JSON.stringify(ctx.validatorRegex)
     );
+    const csp = [
+        `default-src 'none'`,
+        `style-src ${ctx.cspSource} 'nonce-${ctx.nonce}'`,
+        `script-src 'nonce-${ctx.nonce}'`,
+        `font-src ${ctx.cspSource}`
+    ].join('; ');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <title>Neon Sync Settings</title>
-<style>${SETTINGS_CSS}</style>
+<style nonce="${ctx.nonce}">${SETTINGS_CSS}</style>
 </head>
 <body>
 ${SETTINGS_BODY}
-<script>${script}</script>
+<script nonce="${ctx.nonce}">${script}</script>
 </body>
 </html>`;
 }

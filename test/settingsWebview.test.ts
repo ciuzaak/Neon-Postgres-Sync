@@ -10,6 +10,7 @@ import {
     resetMocks,
     type MockWebviewPanel
 } from './helpers/moduleMocks';
+import { PROFILE_TABLENAME_REGEX_SOURCE } from '../src/profileValidation';
 
 installModuleMocks();
 
@@ -62,7 +63,7 @@ test('saveConnectionString stores the value and replies with connectionStringSav
     await deliver(panel, { command: 'saveConnectionString', url: 'postgres://x' });
 
     assert.equal(secrets.get('neonSync.connectionString'), 'postgres://x');
-    assert.ok(findReply(panel, 'connectionStringSaved'));
+    assert.deepEqual(findReply(panel, 'connectionStringSaved'), { command: 'connectionStringSaved' });
 });
 
 test('saveConnectionString rejects an empty url with connectionStringError', async () => {
@@ -204,4 +205,91 @@ test('getSettings replies with loadSettings and re-emits focusField when pending
     const focus = findReply(panel, 'focusField');
     assert.ok(focus);
     assert.equal(focus!.field, 'connection');
+});
+
+test('createOrShow with focus posts focusField immediately when settings are already loaded', async () => {
+    const { vscode, panel, SettingsPanel } = setupPanel();
+    // Mark the panel as loaded by delivering an initial getSettings.
+    await deliver(panel, { command: 'getSettings' });
+    panel.webview.postedMessages.length = 0;
+
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never, { focus: 'connection' });
+
+    assert.deepEqual(findReply(panel, 'focusField'), { command: 'focusField', field: 'connection' });
+});
+
+test('createOrShow with focus before loadSettings does not post focusField immediately', async () => {
+    const { vscode, panel, SettingsPanel } = setupPanel();
+    panel.webview.postedMessages.length = 0;
+
+    // Settings have not been loaded yet (no getSettings delivered). The host
+    // must defer the focus message rather than racing the script's listener.
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never, { focus: 'connection' });
+
+    assert.equal(findReply(panel, 'focusField'), undefined);
+
+    // Once loadSettings completes, the deferred focus is emitted exactly once.
+    await deliver(panel, { command: 'getSettings' });
+    const focusReplies = panel.webview.postedMessages.filter(
+        (m): m is MessageEnvelope => typeof m === 'object' && m !== null && (m as MessageEnvelope).command === 'focusField'
+    );
+    assert.equal(focusReplies.length, 1);
+});
+
+test('saveProfile rejects renaming to a name that collides with another profile', async () => {
+    const { panel, ConfigManager } = setupPanel();
+    await ConfigManager.saveProfiles([
+        { name: 'a', filePath: 'a.json', id: '1', tableName: 'records' },
+        { name: 'b', filePath: 'b.json', id: '2', tableName: 'records' }
+    ]);
+
+    await deliver(panel, {
+        command: 'saveProfile',
+        profile: { name: 'b', filePath: 'renamed.json', id: '1', tableName: 'records' },
+        originalName: 'a'
+    });
+
+    const reply = findReply(panel, 'profileSaveError');
+    assert.ok(reply, 'expected profileSaveError reply');
+    const errors = reply!.errors as Record<string, string | undefined>;
+    assert.notEqual(errors.name, undefined);
+    // Make sure no profile was overwritten.
+    const persisted = ConfigManager.getProfiles();
+    assert.equal(persisted.find((p) => p.name === 'a')?.filePath, 'a.json');
+});
+
+test('rendered HTML embeds the same regex source as the host-side validator', () => {
+    const { vscode } = resetMocks();
+    const { SettingsPanel } = loadModules();
+    const panel = createMockWebviewPanel();
+    vscode.__pendingWebviewPanel = panel;
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
+
+    const html = panel.webview.html;
+    const match = html.match(/new RegExp\((".+?")\)/);
+    assert.ok(match, 'regex literal not found in rendered HTML');
+    const source = JSON.parse(match![1]);
+    assert.equal(source, PROFILE_TABLENAME_REGEX_SOURCE);
+    const re = new RegExp(source);
+    assert.equal(re.test('public.records'), true);
+    assert.equal(re.test('records; drop'), false);
+});
+
+test('rendered HTML applies a CSP meta tag and a nonce to inline script and style', () => {
+    const { vscode } = resetMocks();
+    const { SettingsPanel } = loadModules();
+    const panel = createMockWebviewPanel();
+    vscode.__pendingWebviewPanel = panel;
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
+
+    const html = panel.webview.html;
+    const cspMatch = html.match(/Content-Security-Policy"\s+content="([^"]+)"/);
+    assert.ok(cspMatch, 'expected CSP meta tag');
+    const csp = cspMatch![1];
+    const nonceMatch = csp.match(/'nonce-([^']+)'/);
+    assert.ok(nonceMatch, 'expected nonce in CSP');
+    const nonce = nonceMatch![1];
+    assert.ok(html.includes(`<style nonce="${nonce}">`), 'expected style tag with matching nonce');
+    assert.ok(html.includes(`<script nonce="${nonce}">`), 'expected script tag with matching nonce');
+    assert.ok(csp.includes(`default-src 'none'`), 'expected default-src none in CSP');
 });
