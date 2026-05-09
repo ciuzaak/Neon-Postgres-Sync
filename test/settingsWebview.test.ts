@@ -327,6 +327,30 @@ test('pickFilePath omits defaultUri when no workspace and the value is relative'
     assert.equal(captured.defaultUri, undefined);
 });
 
+test('rendered CSS overrides hidden for any class that sets display: flex', () => {
+    // Plain `hidden` attribute relies on the UA `[hidden] { display: none }` rule,
+    // which a custom `display: flex` rule beats on specificity. Every class that
+    // is toggled via `.hidden = true` AND has `display: flex|grid|inline-flex|inline-grid`
+    // must add an explicit `.cls[hidden] { display: none; }` override, or the
+    // attribute is silently ignored.
+    const { vscode } = resetMocks();
+    const { SettingsPanel } = loadModules();
+    const panel = createMockWebviewPanel();
+    vscode.__pendingWebviewPanel = panel;
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
+
+    const html = panel.webview.html;
+    // Regression guard: classes we know are toggled via the hidden attribute.
+    const togglesHidden = ['.ns-confirm-row', '.ns-modal-backdrop'];
+    for (const cls of togglesHidden) {
+        const escaped = cls.replace(/[.]/g, '\\.');
+        const display = new RegExp(escaped + '\\s*\\{[^}]*display:\\s*(flex|grid|inline-flex|inline-grid)');
+        if (!display.test(html)) continue;
+        const override = new RegExp(escaped + '\\[hidden\\]\\s*\\{[^}]*display:\\s*none');
+        assert.ok(override.test(html), `${cls} sets display: flex/grid but has no [hidden] override; the hidden attribute will be ignored`);
+    }
+});
+
 test('rendered HTML applies a CSP meta tag and a nonce to inline script and style', () => {
     const { vscode } = resetMocks();
     const { SettingsPanel } = loadModules();

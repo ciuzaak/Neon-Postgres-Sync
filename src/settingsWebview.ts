@@ -338,6 +338,7 @@ body {
     background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background));
     border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
 }
+.ns-confirm-row[hidden] { display: none; }
 .ns-confirm-row__msg { font-size: 12px; flex: 1; }
 
 .ns-profile-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
