@@ -1,8 +1,9 @@
 # Neon Postgres Sync
 
 [![Visual Studio Marketplace](https://vsmarketplacebadges.dev/version/ciuzaak.neon-postgres-sync.png)](https://marketplace.visualstudio.com/items?itemName=ciuzaak.neon-postgres-sync)
+[![VS Marketplace Installs](https://vsmarketplacebadges.dev/installs/ciuzaak.neon-postgres-sync.png)](https://marketplace.visualstudio.com/items?itemName=ciuzaak.neon-postgres-sync)
 [![Open VSX](https://raster.shields.io/open-vsx/v/ciuzaak/neon-postgres-sync?label=Open%20VSX)](https://open-vsx.org/extension/ciuzaak/neon-postgres-sync)
-[![Installs](https://vsmarketplacebadges.dev/installs/ciuzaak.neon-postgres-sync.png)](https://marketplace.visualstudio.com/items?itemName=ciuzaak.neon-postgres-sync)
+[![Open VSX Downloads](https://raster.shields.io/open-vsx/dt/ciuzaak/neon-postgres-sync?label=OVSX%20Downloads)](https://open-vsx.org/extension/ciuzaak/neon-postgres-sync)
 
 Sync local files with Neon Postgres records. This extension allows you to upload and download configuration files (or any text content) to/from a PostgreSQL database, preserving comments and formatting by treating content as raw text.
 
