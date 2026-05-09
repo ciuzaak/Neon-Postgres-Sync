@@ -106,6 +106,24 @@ test('setConnectionString stores the value in SecretStorage and notifies listene
     assert.equal(notificationCount, 1);
 });
 
+test('saveProfiles writes atomically via a sibling temp file', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const { ConfigManager } = initConfig(storagePath);
+    const profiles: Profile[] = [
+        { name: 'a', filePath: 'a.json', id: '1', tableName: 'records' }
+    ];
+
+    await ConfigManager.saveProfiles(profiles);
+
+    const configPath = path.join(storagePath, 'neon-sync.json');
+    assert.equal(fs.existsSync(configPath), true);
+    // No leftover temp files in the storage directory.
+    const leftovers = fs.readdirSync(storagePath).filter((name) => name.endsWith('.tmp'));
+    assert.deepEqual(leftovers, []);
+    const persisted = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as ConfigFile;
+    assert.deepEqual(persisted.profiles, profiles);
+});
+
 test('promptMissingConnectionString shows an error toast with an Open Settings button', async () => {
     const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
     const { ConfigManager, vscode } = initConfig(storagePath);

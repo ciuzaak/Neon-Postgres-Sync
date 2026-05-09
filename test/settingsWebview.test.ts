@@ -275,6 +275,58 @@ test('rendered HTML embeds the same regex source as the host-side validator', ()
     assert.equal(re.test('records; drop'), false);
 });
 
+test('pickFilePath surfaces dialog failures as a VS Code toast, not as connection-status error', async () => {
+    const { vscode, panel } = setupPanel();
+    vscode.window.showOpenDialog = async () => { throw new Error('disk on fire'); };
+
+    await deliver(panel, { command: 'pickFilePath' });
+
+    assert.equal(findReply(panel, 'genericError'), undefined);
+    assert.equal(findReply(panel, 'connectionStringError'), undefined);
+    assert.deepEqual(vscode.window.errorMessages, ['Neon Sync: disk on fire']);
+});
+
+test('saveConnectionString routes unexpected failures to connectionStringError', async () => {
+    const { ConfigManager, panel } = setupPanel();
+    ConfigManager.setConnectionString = async () => { throw new Error('keychain locked'); };
+
+    await deliver(panel, { command: 'saveConnectionString', url: 'postgres://x' });
+
+    const reply = findReply(panel, 'connectionStringError');
+    assert.ok(reply);
+    assert.equal(reply!.error, 'keychain locked');
+});
+
+test('pickFilePath uses an absolute defaultUri resolved from a relative currentValue', async () => {
+    const { vscode, panel } = setupPanel();
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-ws-'));
+    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot) }];
+    let captured: any = null;
+    vscode.window.showOpenDialog = async (options: unknown) => {
+        captured = options;
+        return undefined;
+    };
+
+    await deliver(panel, { command: 'pickFilePath', currentValue: 'subdir/file.json' });
+
+    assert.ok(captured.defaultUri, 'expected defaultUri to be passed');
+    assert.equal(captured.defaultUri.fsPath, path.resolve(workspaceRoot, 'subdir/file.json'));
+});
+
+test('pickFilePath omits defaultUri when no workspace and the value is relative', async () => {
+    const { vscode, panel } = setupPanel();
+    vscode.workspace.workspaceFolders = undefined;
+    let captured: any = null;
+    vscode.window.showOpenDialog = async (options: unknown) => {
+        captured = options;
+        return undefined;
+    };
+
+    await deliver(panel, { command: 'pickFilePath', currentValue: 'relative.json' });
+
+    assert.equal(captured.defaultUri, undefined);
+});
+
 test('rendered HTML applies a CSP meta tag and a nonce to inline script and style', () => {
     const { vscode } = resetMocks();
     const { SettingsPanel } = loadModules();

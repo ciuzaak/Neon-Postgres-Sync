@@ -116,18 +116,27 @@ export class SettingsPanel {
             } catch (error) {
                 console.error('Settings webview handler error:', error);
                 const errorMessage = (error as Error)?.message ?? 'Unknown error';
-                if (message?.command === 'saveProfile') {
-                    await webview.postMessage({
-                        command: 'profileSaveError',
-                        errors: {},
-                        formError: `Failed to save profile: ${errorMessage}`,
-                        originalName: (message as SaveProfileMessage).originalName
-                    });
-                } else {
-                    await webview.postMessage({
-                        command: 'genericError',
-                        error: errorMessage
-                    });
+                switch (message?.command) {
+                    case 'saveConnectionString':
+                    case 'clearConnectionString':
+                        await webview.postMessage({
+                            command: 'connectionStringError',
+                            error: errorMessage
+                        });
+                        break;
+                    case 'saveProfile':
+                        await webview.postMessage({
+                            command: 'profileSaveError',
+                            errors: {},
+                            formError: `Failed to save profile: ${errorMessage}`,
+                            originalName: (message as SaveProfileMessage).originalName
+                        });
+                        break;
+                    default:
+                        // For deleteProfile, pickFilePath, getSettings: use a
+                        // VS Code-native toast since the originating UI may have
+                        // already been dismissed and there's no clean inline slot.
+                        void vscode.window.showErrorMessage(`Neon Sync: ${errorMessage}`);
                 }
             }
         }, undefined, this._disposables);
