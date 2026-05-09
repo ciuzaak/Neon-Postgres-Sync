@@ -183,7 +183,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const profiles = ConfigManager.getProfiles();
         if (profiles.length === 0) {
-            vscode.window.showErrorMessage('No profiles configured. Run "Neon Sync: Open Config File" to configure.');
+            vscode.window.showErrorMessage('No profiles configured. Run "Neon Sync: Open Settings" to configure.');
             return;
         }
 
@@ -229,19 +229,6 @@ export function activate(context: vscode.ExtensionContext) {
         await SyncManager.cancelSync();
     });
 
-    const configureUrlDisposable = vscode.commands.registerCommand('neonSync.configureUrl', async () => {
-        const url = await vscode.window.showInputBox({
-            prompt: 'Enter PostgreSQL Connection URL',
-            placeHolder: 'postgres://user:password@host:port/dbname',
-            ignoreFocusOut: true
-        });
-
-        if (url) {
-            await ConfigManager.setConnectionString(url);
-            vscode.window.showInformationMessage('Connection URL updated in secure storage.');
-        }
-    });
-
     const openConfigDisposable = vscode.commands.registerCommand('neonSync.openConfigFile', async () => {
         await ConfigManager.openConfigFile();
     });
@@ -257,7 +244,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(syncDisposable);
     context.subscriptions.push(swapDirectionDisposable);
-    context.subscriptions.push(configureUrlDisposable);
     context.subscriptions.push(confirmSyncDisposable);
     context.subscriptions.push(cancelSyncDisposable);
     context.subscriptions.push(openConfigDisposable);

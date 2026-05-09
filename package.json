@@ -29,10 +29,6 @@
         "icon": "$(arrow-swap)"
       },
       {
-        "command": "neonSync.configureUrl",
-        "title": "Neon Sync: Configure Connection URL"
-      },
-      {
         "command": "neonSync.confirmSync",
         "title": "Confirm Sync",
         "icon": "$(check)"
@@ -44,7 +40,7 @@
       },
       {
         "command": "neonSync.openConfigFile",
-        "title": "Neon Sync: Open Config File"
+        "title": "Neon Sync: Open Settings (JSON)"
       },
       {
         "command": "neonSync.openSettings",
