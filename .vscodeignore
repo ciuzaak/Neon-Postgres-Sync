@@ -1,6 +1,10 @@
 .vscode/**
 .vscode-test/**
 src/**
+test/**
+out-test/**
+docs/**
+tsconfig.test.json
 node_modules/**/@types/**
 node_modules/@types/**
 node_modules/**/typescript/**
