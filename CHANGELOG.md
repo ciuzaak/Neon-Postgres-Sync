@@ -2,6 +2,12 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [0.6.0] - 2026-05-09
+### Changed
+- **Settings Panel**: Rebuilt with a theme-aware macOS-style design. Profile add and edit now happen in a modal dialog with required-field validation; the file path field includes a `Browse…` button that uses VS Code's native open dialog and returns a workspace-relative path when the choice lives inside the workspace
+- **Connection URL Flow**: Removed the standalone `Neon Sync: Configure Connection URL` command. The connection URL is now configured in the settings panel (auto-saves on blur into Secret Storage). When a sync runs without a connection string, the error toast offers an `Open Settings` button that focuses the Connection field
+- **Command Naming**: Renamed `Neon Sync: Open Config File` to `Neon Sync: Open Settings (JSON)` to match VS Code's `Preferences: Open User Settings (JSON)` convention
+
 ## [0.5.1] - 2026-04-23
 ### Fixed
 - **Multi-Profile Sync**: After confirming a diff, the "Diff open for <name>" banner and the disabled state on the remaining profile rows stayed stuck on the panel because the lock was cleared after the post-confirm render. The lock is now released before the follow-up render
