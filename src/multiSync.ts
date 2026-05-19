@@ -3,11 +3,26 @@ import * as fs from 'fs';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
 import { SyncManager, SyncDirection } from './sync';
+import {
+    KeyPath,
+    parsePaths,
+    assertJsonc,
+    stripKeys,
+    mergeBack,
+    JsoncFilterParseError
+} from './jsoncFilter';
 
 interface MultiSyncItem {
     profile: Profile;
+    /** Stripped local content when excludeKeys is non-empty, otherwise === localOriginal. */
     localContent: string;
+    /** Stripped remote content when excludeKeys is non-empty, otherwise === remoteOriginal. */
     remoteContent: string;
+    /** Raw local content (with filtered keys present) — input to mergeBack. */
+    localOriginal: string;
+    /** Raw remote content (with filtered keys present) — input to mergeBack. */
+    remoteOriginal: string;
+    excludeKeys: KeyPath[];
     localExists: boolean;
     remoteExists: boolean;
     direction: SyncDirection;
@@ -20,6 +35,14 @@ interface MultiSyncItem {
     // earlier Confirm / Confirm All attempt. Subsequent retries must skip the
     // DB write (it's already committed) and only re-attempt the local write.
     remotePersisted: boolean;
+    /** Set when excludeKeys is non-empty and either side fails to parse as JSONC. */
+    parseError?: string;
+    /**
+     * Set during `confirmAll`'s phase 1 to the merged bytes that got committed
+     * remotely; phase 2's local write reads it back. Cleared after each
+     * `confirmAll` call (success or failure) and never read outside that flow.
+     */
+    _pendingFinalContent?: string;
 }
 
 interface ItemView {
@@ -34,6 +57,7 @@ interface ItemView {
     localExists: boolean;
     remoteExists: boolean;
     remotePersisted: boolean;
+    parseError?: string;
 }
 
 export class MultiSyncManager {
@@ -115,14 +139,34 @@ export class MultiSyncManager {
                 const { data: remoteData, updateTime: remoteUpdateTime } = remotes[idx];
                 const absolutePath = SyncManager.resolvePath(profile.filePath);
                 const localExists = fs.existsSync(absolutePath);
-                let localContent = '';
+                let localOriginal = '';
                 let localMtime: Date | null = null;
                 if (localExists) {
-                    localContent = fs.readFileSync(absolutePath, 'utf-8');
+                    localOriginal = fs.readFileSync(absolutePath, 'utf-8');
                     localMtime = fs.statSync(absolutePath).mtime;
                 }
                 const remoteExists = remoteData !== null;
-                const remoteContent = remoteData ?? '';
+                const remoteOriginal = remoteData ?? '';
+
+                const excludeKeys = parsePaths(Array.isArray(profile.excludeKeys) ? profile.excludeKeys : []);
+
+                let localContent = localOriginal;
+                let remoteContent = remoteOriginal;
+                let parseError: string | undefined;
+                if (excludeKeys.length > 0 && localExists && remoteExists) {
+                    try {
+                        assertJsonc(localOriginal, 'local');
+                        assertJsonc(remoteOriginal, 'remote');
+                        localContent = stripKeys(localOriginal, excludeKeys);
+                        remoteContent = stripKeys(remoteOriginal, excludeKeys);
+                    } catch (e) {
+                        if (e instanceof JsoncFilterParseError) {
+                            parseError = `excludeKeys active but ${e.side} is not valid JSONC: ${e.message}`;
+                        } else {
+                            throw e;
+                        }
+                    }
+                }
 
                 const suggestion = SyncManager.decideSyncDirection(
                     localExists,
@@ -141,6 +185,9 @@ export class MultiSyncManager {
                     profile,
                     localContent,
                     remoteContent,
+                    localOriginal,
+                    remoteOriginal,
+                    excludeKeys,
                     localExists,
                     remoteExists,
                     direction: suggestion.direction,
@@ -149,7 +196,8 @@ export class MultiSyncManager {
                     added,
                     removed,
                     busy: false,
-                    remotePersisted: false
+                    remotePersisted: false,
+                    parseError
                 };
             });
         } catch (error: any) {
@@ -160,6 +208,7 @@ export class MultiSyncManager {
 
     private static needsSync(item: MultiSyncItem): boolean {
         if (!item.localExists && !item.remoteExists) return false;
+        if (item.parseError) return true; // surface the row with its error
         if (item.localExists && item.remoteExists && item.localContent === item.remoteContent) {
             return false;
         }
@@ -204,7 +253,8 @@ export class MultiSyncManager {
             busy: item.busy,
             localExists: item.localExists,
             remoteExists: item.remoteExists,
-            remotePersisted: item.remotePersisted
+            remotePersisted: item.remotePersisted,
+            parseError: item.parseError
         }));
 
         this.panel.webview.html = this.renderHtml(view, this.activeDiffProfile);
@@ -250,9 +300,17 @@ export class MultiSyncManager {
 
     private static async confirmOne(name: string): Promise<void> {
         const item = this.findItem(name);
-        if (!item || item.busy) return;
+        if (!item || item.busy || item.parseError) return;
 
-        const candidateContent = item.direction === 'download' ? item.remoteContent : item.localContent;
+        const candidateStripped = item.direction === 'download' ? item.remoteContent : item.localContent;
+        const candidateContent = item.excludeKeys.length > 0
+            ? mergeBack(
+                candidateStripped,
+                item.direction === 'download' ? item.localOriginal : item.remoteOriginal,
+                item.excludeKeys
+              )
+            : candidateStripped;
+
         item.busy = true;
         this.render();
 
@@ -267,6 +325,11 @@ export class MultiSyncManager {
         }
     }
 
+    /**
+     * Persist `candidateContent` for `item`. `candidateContent` is the FINAL
+     * bytes (already mergeBack'd if filtering was active). On upload, skips
+     * the DB write when remote already holds the same bytes (retry case).
+     */
     private static async applySync(item: MultiSyncItem, candidateContent: string): Promise<void> {
         const localFilePath = SyncManager.resolvePath(item.profile.filePath);
         if (item.direction === 'download') {
@@ -279,7 +342,10 @@ export class MultiSyncManager {
             // dropping fresh edits the user made in a diff re-opened on a
             // previously persisted row — those change the candidate, so they
             // must be re-uploaded.
-            const alreadyCommitted = item.remotePersisted && item.remoteContent === candidateContent;
+            // Compare against remoteOriginal (the committed bytes) rather than
+            // the stripped remoteContent, since candidateContent is always final
+            // (mergeBack'd) bytes.
+            const alreadyCommitted = item.remotePersisted && item.remoteOriginal === candidateContent;
             if (!alreadyCommitted) {
                 await DatabaseService.updateRecord(item.profile, candidateContent);
                 this.markRemotePersisted(item, candidateContent);
@@ -289,19 +355,19 @@ export class MultiSyncManager {
         }
     }
 
-    /**
-     * Record that the remote row now holds `candidateContent`. Once the DB is
-     * committed the user's intended end-state is that both sides equal
-     * `candidateContent`, so we mirror the bytes into `localContent` too —
-     * even if the subsequent local write fails. That keeps the in-memory
-     * invariant `localContent === remoteContent` for persisted rows, so any
-     * retry (via Confirm, Confirm All, or re-opened diff) derives its
-     * candidate from the committed bytes rather than the pre-edit originals
-     * still on disk.
-     */
-    private static markRemotePersisted(item: MultiSyncItem, candidateContent: string): void {
-        item.remoteContent = candidateContent;
-        item.localContent = candidateContent;
+    private static markRemotePersisted(item: MultiSyncItem, finalBytes: string): void {
+        item.remoteOriginal = finalBytes;
+        item.localOriginal = finalBytes;
+        if (item.excludeKeys.length > 0) {
+            // Stripped projection is invariant under merge: filtered keys are
+            // exactly what was swapped in. Recompute defensively.
+            const stripped = stripKeys(finalBytes, item.excludeKeys);
+            item.localContent = stripped;
+            item.remoteContent = stripped;
+        } else {
+            item.localContent = finalBytes;
+            item.remoteContent = finalBytes;
+        }
         item.remotePersisted = true;
         const stats = this.computeDiffStats(item.localContent, item.remoteContent, item.direction);
         item.added = stats.added;
@@ -310,7 +376,7 @@ export class MultiSyncManager {
 
     private static async openDiffFor(name: string): Promise<void> {
         const item = this.findItem(name);
-        if (!item || item.busy) return;
+        if (!item || item.busy || item.parseError) return;
 
         if (this.activeDiffProfile) {
             vscode.window.showWarningMessage('Another diff is currently open. Close it before opening another.');
@@ -325,24 +391,24 @@ export class MultiSyncManager {
             const result = await SyncManager.openDiffForExternal(
                 item.profile,
                 item.direction,
-                item.localContent,
-                item.remoteContent
+                item.localContent,   // already stripped if filtering
+                item.remoteContent,  // already stripped if filtering
+                item.excludeKeys
             );
 
-            // The diff editor has been closed by confirm/cancel; release the lock
-            // before any follow-up render so the banner and other rows' buttons
-            // reflect the unlocked state. Otherwise removeItem + onItemsChanged
-            // below re-render with the stale lock, leaving "Diff open for X"
-            // stuck on the panel even after the profile has been synced away.
             this.activeDiffProfile = null;
 
             if (result.outcome === 'confirmed') {
-                // Direction may have flipped inside the diff via the swap icon — trust what the diff returned.
                 item.direction = result.direction;
+                // The diff editor returned the stripped, possibly user-edited candidate.
+                // mergeBack the destination side's originals to produce final bytes.
+                const dest = result.direction === 'download' ? item.localOriginal : item.remoteOriginal;
+                const finalContent = item.excludeKeys.length > 0
+                    ? mergeBack(result.candidateContent, dest, item.excludeKeys)
+                    : result.candidateContent;
                 try {
-                    await this.applySync(item, result.candidateContent);
+                    await this.applySync(item, finalContent);
                     if (!this.panel) {
-                        // Panel was closed while diff was open — still honor the confirm, just notify.
                         vscode.window.showInformationMessage(`Synced ${name}.`);
                         return;
                     }
@@ -374,23 +440,27 @@ export class MultiSyncManager {
         // Only uploads whose remote side has NOT been committed yet go into the
         // batch. Rows left over from an earlier partial Confirm All already have
         // `remotePersisted = true`; re-sending them would push the same bytes
-        // and bump `update_time`.
+        // and bump `update_time`. Parse-error rows are excluded entirely.
         const uploadsNeedingDb = snapshot.filter(
-            (i) => i.direction === 'upload' && !i.remotePersisted
+            (i) => i.direction === 'upload' && !i.remotePersisted && !i.parseError
         );
 
-        // Phase 1 — atomic DB commit. If this throws, nothing has been persisted
-        // remotely or locally for this attempt, so we can restore the pending
-        // state as-is.
+        // Phase 1 — atomic DB commit.
         if (uploadsNeedingDb.length > 0) {
             try {
-                await DatabaseService.updateRecords(
-                    uploadsNeedingDb.map((i) => ({ profile: i.profile, data: i.localContent }))
-                );
+                const payloads = uploadsNeedingDb.map((i) => {
+                    const data = i.excludeKeys.length > 0
+                        ? mergeBack(i.localContent, i.remoteOriginal, i.excludeKeys)
+                        : i.localContent;
+                    i._pendingFinalContent = data;
+                    return { profile: i.profile, data };
+                });
+                await DatabaseService.updateRecords(payloads);
                 for (const u of uploadsNeedingDb) {
-                    this.markRemotePersisted(u, u.localContent);
+                    this.markRemotePersisted(u, u._pendingFinalContent!);
                 }
             } catch (error: any) {
+                for (const u of uploadsNeedingDb) u._pendingFinalContent = undefined;
                 for (const it of this.items) it.busy = false;
                 this.render();
                 vscode.window.showErrorMessage(
@@ -400,33 +470,54 @@ export class MultiSyncManager {
             }
         }
 
-        // Phase 2 — best-effort per-item local writes. The remote commit above is
-        // already persisted, so we cannot undo it here. Instead, track which local
-        // writes succeeded and only clear those rows from the panel; keep the
-        // failures visible so the user can see them, fix the cause, and retry
-        // without risking a double-commit on the successful ones.
+        // Phase 2 — best-effort per-item local writes. Skip parse-error rows.
         const succeeded: MultiSyncItem[] = [];
         const failed: Array<{ item: MultiSyncItem; error: string }> = [];
         for (const item of snapshot) {
+            if (item.parseError) {
+                // Stays visible with its error; not counted as success or failure.
+                continue;
+            }
             const localPath = SyncManager.resolvePath(item.profile.filePath);
-            const content = item.direction === 'download' ? item.remoteContent : item.localContent;
+            let content: string;
+            if (item.direction === 'download') {
+                content = item.excludeKeys.length > 0
+                    ? mergeBack(item.remoteContent, item.localOriginal, item.excludeKeys)
+                    : item.remoteContent;
+            } else {
+                content = item._pendingFinalContent
+                    ?? (item.excludeKeys.length > 0
+                        ? mergeBack(item.localContent, item.remoteOriginal, item.excludeKeys)
+                        : item.localContent);
+            }
             try {
                 fs.writeFileSync(localPath, content);
                 succeeded.push(item);
             } catch (e: any) {
                 failed.push({ item, error: e?.message ?? String(e) });
+            } finally {
+                item._pendingFinalContent = undefined;
             }
         }
 
         const failedSet = new Set(failed.map((f) => f.item));
-        this.items = snapshot.filter((i) => failedSet.has(i));
+        // Keep parseError rows in this.items (they're not in succeeded or failed).
+        this.items = snapshot.filter((i) => failedSet.has(i) || !!i.parseError);
         for (const it of this.items) it.busy = false;
 
         if (failed.length === 0) {
-            vscode.window.showInformationMessage(
-                `Synced ${succeeded.length} profile${succeeded.length === 1 ? '' : 's'}.`
-            );
-            this.panel?.dispose();
+            const errorCount = this.items.length; // only parseError rows remain
+            if (errorCount === 0) {
+                vscode.window.showInformationMessage(
+                    `Synced ${succeeded.length} profile${succeeded.length === 1 ? '' : 's'}.`
+                );
+                this.panel?.dispose();
+            } else {
+                vscode.window.showInformationMessage(
+                    `Synced ${succeeded.length} profile${succeeded.length === 1 ? '' : 's'}. ${errorCount} skipped due to parse errors.`
+                );
+                this.render();
+            }
             return;
         }
 
@@ -523,6 +614,7 @@ export class MultiSyncManager {
     private static renderHtml(items: ItemView[], activeDiffProfile: string | null): string {
         const rows = items.map((item) => this.renderRow(item, activeDiffProfile)).join('');
         const disableAll = items.some((i) => i.busy);
+        const allErrored = items.length > 0 && items.every((i) => i.parseError);
         const diffLocked = activeDiffProfile !== null;
         const totalLabel = `${items.length} pending`;
 
@@ -635,6 +727,15 @@ export class MultiSyncManager {
         padding: 40px 0;
         color: var(--vscode-descriptionForeground);
     }
+    .parse-error {
+        grid-column: 2 / span 2;
+        color: var(--vscode-errorForeground);
+        font-size: 0.9em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .row.has-error .direction, .row.has-error .stats { display: none; }
 </style>
 </head>
 <body>
@@ -646,7 +747,7 @@ ${items.length === 0 ? '<div class="empty">All profiles synced.</div>' : `<div c
     <div></div>
     <div class="actions">
         <button id="cancel">Close</button>
-        <button id="confirmAll" class="primary" ${disableAll || diffLocked || items.length === 0 ? 'disabled' : ''}>Confirm All (${items.length})</button>
+        <button id="confirmAll" class="primary" ${disableAll || diffLocked || items.length === 0 || allErrored ? 'disabled' : ''}>Confirm All (${items.filter(i => !i.parseError).length})</button>
     </div>
 </div>
 <script>
@@ -674,21 +775,25 @@ ${items.length === 0 ? '<div class="empty">All profiles synced.</div>' : `<div c
         const persistedMark = item.remotePersisted
             ? `<span class="persisted" title="Remote is already committed; only the local file still needs writing.">remote committed</span>`
             : '';
-        const disabled = item.busy || (activeDiffProfile !== null && activeDiffProfile !== item.name);
-        const diffDisabled = item.busy || activeDiffProfile !== null;
+
+        const hasError = !!item.parseError;
+        const disabled = item.busy || hasError || (activeDiffProfile !== null && activeDiffProfile !== item.name);
+        const diffDisabled = item.busy || hasError || activeDiffProfile !== null;
         const attr = (action: string, isDisabled: boolean) =>
             `data-action="${action}" data-profile="${this.escapeHtml(item.name)}" ${isDisabled ? 'disabled' : ''}`;
 
+        const middleCells = hasError
+            ? `<div class="parse-error" title="${this.escapeHtml(item.parseError!)}">⚠ ${this.escapeHtml(item.parseError!)}</div>`
+            : `<div class="direction">${this.escapeHtml(arrow)}${ambiguousMark}</div>
+           <div class="stats"><span class="added">+${item.added}</span><span class="removed">-${item.removed}</span></div>`;
+
         return `
-<div class="row ${item.busy ? 'busy' : ''}">
+<div class="row ${item.busy ? 'busy' : ''} ${hasError ? 'has-error' : ''}">
     <div>
         <div class="name">${this.escapeHtml(item.name)}${persistedMark}</div>
         <div class="path">${this.escapeHtml(item.filePath)}</div>
     </div>
-    <div class="direction">${this.escapeHtml(arrow)}${ambiguousMark}</div>
-    <div class="stats">
-        <span class="added">+${item.added}</span><span class="removed">-${item.removed}</span>
-    </div>
+    ${middleCells}
     <div></div>
     <div class="actions">
         <button ${attr('swap', disabled)} title="Flip sync direction">Swap</button>
