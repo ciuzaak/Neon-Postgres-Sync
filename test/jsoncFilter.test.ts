@@ -210,3 +210,20 @@ test('mergeBack silently no-ops when destination lacks path AND candidate cannot
     const out = mergeBack(candidate, destination, [['a', 'secret']]);
     assert.deepEqual(JSON.parse(out), { a: 'scalar' });
 });
+
+test('parsePaths rejects lines using v1-unsupported wildcard or array-index syntax', () => {
+    // Per spec, wildcards (a.*) and array indices (a[0], a.[0]) are not
+    // supported in v1. They should be rejected outright rather than silently
+    // matched as literal key names like "*" or "[0]".
+    assert.deepEqual(
+        parsePaths([
+            'valid.key',
+            'a.*',
+            'a[0]',
+            'a.[0]',
+            'wild*card',
+            'arr[1].b'
+        ]),
+        [['valid', 'key']]
+    );
+});

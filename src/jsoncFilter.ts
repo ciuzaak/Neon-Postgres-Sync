@@ -144,6 +144,11 @@ export function mergeBack(
     return current;
 }
 
+// v1 supports only dot-separated literal key names. Wildcards (`*`) and array
+// index syntax (`[0]`, `[*]`) are reserved for future versions; reject any
+// segment containing these so we don't silently match a literal key like "*".
+const UNSUPPORTED_SEGMENT_CHARS_RE = /[*\[\]]/;
+
 /**
  * Normalize raw path strings (one per textarea line / one per JSON array entry)
  * into KeyPath arrays. Trims, splits on '.', drops empty results, dedupes by
@@ -160,6 +165,7 @@ export function parsePaths(raw: ReadonlyArray<string>): KeyPath[] {
         // are almost certainly typos; silently normalizing them to "a" would
         // accidentally match the wrong top-level key.
         if (segments.length === 0 || segments.some((s) => s.length === 0)) continue;
+        if (segments.some((s) => UNSUPPORTED_SEGMENT_CHARS_RE.test(s))) continue;
         const key = segments.join('\x00'); // null-byte joiner: safe vs any user input
         if (seen.has(key)) continue;
         seen.add(key);
