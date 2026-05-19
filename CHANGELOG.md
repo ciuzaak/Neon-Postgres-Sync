@@ -2,9 +2,11 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-05-19
 ### Added
-- Per-profile `excludeKeys` for JSON/JSONC profiles. Listed keys are hidden from the diff view and preserved on the target side at confirm time. Edit via the settings panel's Advanced section or directly in `neon-sync.json`.
+- **Per-Profile Key Filtering (JSON/JSONC only)**: New `excludeKeys` field on each profile lists dot-separated key paths that should be hidden from the diff view and preserved on the target side at confirm time. Useful for machine-specific or transient keys (themes, machine IDs, locally chosen font sizes) that shouldn't propagate across machines. Edit via the settings panel's Advanced section in the Add/Edit Profile modal, or directly in `neon-sync.json`. Comments and formatting on non-filtered keys are preserved (powered by `jsonc-parser`).
+- **Parse-Error Row State (Multi-Sync)**: When `excludeKeys` is active and either side fails to parse as JSONC, the multi-profile panel keeps the row visible with an inline `⚠ excludeKeys active but <side> is not valid JSONC: …` message and disables its action buttons. `Confirm All` excludes these rows and reports the skipped count.
+- **Concurrent `Confirm All` Guard**: `Confirm All` now no-ops if already in flight, preventing a double-click from issuing two DB commits or corrupting the `_pendingFinalContent` retry cache.
 
 ## [0.6.0] - 2026-05-09
 ### Changed

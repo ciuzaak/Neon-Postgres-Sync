@@ -158,4 +158,4 @@ Cases that trigger the explicit prompt:
 
 This extension was originally designed to synchronize Google Antigravity configurations.
 
-**All code in this project was written by Gemini 3 Pro.**
+**Models used to build this project:** Gemini 3 Pro did the initial scaffolding; ongoing maintenance is mostly Claude Opus / Sonnet, with GPT (Codex) handling review passes.
