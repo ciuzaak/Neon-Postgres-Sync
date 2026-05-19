@@ -2,6 +2,10 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [Unreleased]
+### Added
+- Per-profile `excludeKeys` for JSON/JSONC profiles. Listed keys are hidden from the diff view and preserved on the target side at confirm time. Edit via the settings panel's Advanced section or directly in `neon-sync.json`.
+
 ## [0.6.0] - 2026-05-09
 ### Changed
 - **Settings Panel**: Rebuilt with a theme-aware macOS-style design. Profile add and edit now happen in a modal dialog with required-field validation; the file path field includes a `Browse…` button that uses VS Code's native open dialog and returns a workspace-relative path when the choice lives inside the workspace
