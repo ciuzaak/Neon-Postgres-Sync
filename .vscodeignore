@@ -20,6 +20,7 @@ node_modules/**/CONFIG.md
 node_modules/**/DEPLOY.md
 node_modules/**/.travis.yml
 node_modules/**/.jshintrc
+node_modules/jsonc-parser/lib/esm/**
 .git/**
 .gitignore
 *.vsix
