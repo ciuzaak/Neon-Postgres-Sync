@@ -59,6 +59,35 @@ function parseErrorCodeName(code: jsoncParser.ParseErrorCode): string {
     return names[code] ?? `ParseErrorCode(${code})`;
 }
 
+const MODIFY_OPTIONS: jsoncParser.ModificationOptions = {
+    formattingOptions: { tabSize: 4, insertSpaces: true }
+};
+
+/**
+ * Returns `text` with every key at the given paths removed. Comments and
+ * formatting on remaining keys are preserved. No-op when a path does not exist
+ * in the input. Paths are processed deepest-first so that removing an outer
+ * node does not invalidate positions still pointing inside it.
+ */
+export function stripKeys(text: string, paths: ReadonlyArray<KeyPath>): string {
+    if (paths.length === 0) return text;
+
+    const ordered = [...paths].sort((a, b) => b.length - a.length);
+    let current = text;
+    for (const path of ordered) {
+        let edits: jsoncParser.Edit[];
+        try {
+            edits = jsoncParser.modify(current, [...path], undefined, MODIFY_OPTIONS);
+        } catch {
+            // path does not exist or is unreachable — treat as no-op
+            continue;
+        }
+        if (edits.length === 0) continue;
+        current = jsoncParser.applyEdits(current, edits);
+    }
+    return current;
+}
+
 /**
  * Normalize raw path strings (one per textarea line / one per JSON array entry)
  * into KeyPath arrays. Trims, splits on '.', drops empty results, dedupes by
