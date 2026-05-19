@@ -7,6 +7,7 @@ export interface Profile {
     filePath: string;
     id: string;
     tableName: string;
+    excludeKeys?: string[];
 }
 
 export interface ConfigFile {
@@ -155,8 +156,21 @@ export class ConfigManager {
         if (fs.existsSync(configPath)) {
             config = this.readConfig() || { profiles: [] };
         }
-        config.profiles = profiles;
+        config.profiles = profiles.map((p) => this.normalizeProfileForWrite(p));
         this.atomicWriteJson(configPath, config);
+    }
+
+    private static normalizeProfileForWrite(profile: Profile): Profile {
+        const cleaned: Profile = {
+            name: profile.name,
+            filePath: profile.filePath,
+            id: profile.id,
+            tableName: profile.tableName
+        };
+        if (Array.isArray(profile.excludeKeys) && profile.excludeKeys.length > 0) {
+            cleaned.excludeKeys = [...profile.excludeKeys];
+        }
+        return cleaned;
     }
 
     /**

@@ -173,3 +173,22 @@ test('clearConnectionString deletes the secret, removes any legacy file value, a
     assert.equal(notifications, 1);
     assert.equal(await ConfigManager.getConnectionString(), undefined);
 });
+
+test('saveProfiles drops empty/missing excludeKeys when writing the config file', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const { ConfigManager } = initConfig(storagePath);
+
+    await ConfigManager.saveProfiles([
+        { name: 'A', filePath: 'a.json', id: 'a1', tableName: 'json_records' },
+        { name: 'B', filePath: 'b.json', id: 'b1', tableName: 'json_records', excludeKeys: [] },
+        { name: 'C', filePath: 'c.json', id: 'c1', tableName: 'json_records', excludeKeys: ['x.y'] }
+    ]);
+
+    const written = JSON.parse(
+        fs.readFileSync(path.join(storagePath, 'neon-sync.json'), 'utf-8')
+    ) as ConfigFile;
+
+    assert.equal(Object.prototype.hasOwnProperty.call(written.profiles[0], 'excludeKeys'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(written.profiles[1], 'excludeKeys'), false);
+    assert.deepEqual(written.profiles[2].excludeKeys, ['x.y']);
+});
