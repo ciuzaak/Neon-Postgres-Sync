@@ -935,6 +935,7 @@ const SETTINGS_SCRIPT = `
                 if (msg.path) {
                     els.pmFilePath.value = msg.path;
                     state.modalDirty = true;
+                    maybeShowExcludeWarning();
                 }
                 break;
             case 'focusField':

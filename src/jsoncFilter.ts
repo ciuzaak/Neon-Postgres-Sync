@@ -12,6 +12,17 @@ export class JsoncFilterParseError extends Error {
     }
 }
 
+export class JsoncFilterMergeError extends Error {
+    constructor(public readonly path: KeyPath, public readonly cause: unknown) {
+        super(
+            `Failed to splice destination value back at path "${path.join('.')}": ` +
+            `the candidate's structure makes this path unreachable. ` +
+            `Edit the candidate so the path's parents are objects, or remove the candidate's edits in that area.`
+        );
+        this.name = 'JsoncFilterMergeError';
+    }
+}
+
 const PARSE_OPTIONS: jsoncParser.ParseOptions = {
     disallowComments: false,
     allowTrailingComma: true,
@@ -117,10 +128,15 @@ export function mergeBack(
         let edits: jsoncParser.Edit[];
         try {
             edits = jsoncParser.modify(current, [...path], replacement, MODIFY_OPTIONS);
-        } catch {
-            // Path unreachable in candidate (e.g. intermediate is a scalar).
-            // Treat as no-op — consistent with stripKeys' behavior.
-            continue;
+        } catch (e) {
+            if (replacement === undefined) {
+                // Destination has no value for this path; we wanted to delete
+                // from candidate, but the path is unreachable there too. No-op.
+                continue;
+            }
+            // Destination has a value but candidate's structure blocks restoring it.
+            // Silent swallow would lose the destination value — surface to caller.
+            throw new JsoncFilterMergeError(path, e);
         }
         if (edits.length === 0) continue;
         current = jsoncParser.applyEdits(current, edits);
@@ -139,8 +155,11 @@ export function parsePaths(raw: ReadonlyArray<string>): KeyPath[] {
     for (const line of raw) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        const segments = trimmed.split('.').map((s) => s.trim()).filter((s) => s.length > 0);
-        if (segments.length === 0) continue;
+        const segments = trimmed.split('.').map((s) => s.trim());
+        // Reject lines with empty segments (e.g. "a.", ".a", "a..b") — these
+        // are almost certainly typos; silently normalizing them to "a" would
+        // accidentally match the wrong top-level key.
+        if (segments.length === 0 || segments.some((s) => s.length === 0)) continue;
         const key = segments.join('\x00'); // null-byte joiner: safe vs any user input
         if (seen.has(key)) continue;
         seen.add(key);

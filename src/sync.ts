@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
-import { KeyPath, parsePaths, assertJsonc, stripKeys, mergeBack, JsoncFilterParseError } from './jsoncFilter';
+import { KeyPath, parsePaths, assertJsonc, stripKeys, mergeBack, JsoncFilterParseError, JsoncFilterMergeError } from './jsoncFilter';
 
 export type SyncDirection = 'download' | 'upload';
 export type SyncOutcome = 'confirmed' | 'cancelled';
@@ -104,10 +104,10 @@ export class SyncManager {
 
                     let localForCompare = localContent;
                     let remoteForCompare = remoteContent;
-                    if (excludeKeys.length > 0 && localExists && remoteExists) {
+                    if (excludeKeys.length > 0) {
                         try {
-                            assertJsonc(localContent, 'local');
-                            assertJsonc(remoteContent, 'remote');
+                            if (localExists) assertJsonc(localContent, 'local');
+                            if (remoteExists) assertJsonc(remoteContent, 'remote');
                         } catch (e) {
                             if (e instanceof JsoncFilterParseError) {
                                 vscode.window.showErrorMessage(
@@ -117,8 +117,8 @@ export class SyncManager {
                             }
                             throw e;
                         }
-                        localForCompare = stripKeys(localContent, excludeKeys);
-                        remoteForCompare = stripKeys(remoteContent, excludeKeys);
+                        if (localExists) localForCompare = stripKeys(localContent, excludeKeys);
+                        if (remoteExists) remoteForCompare = stripKeys(remoteContent, excludeKeys);
                     }
 
                     if (!localExists && !remoteExists) {
@@ -436,8 +436,14 @@ export class SyncManager {
             }
 
         } catch (error: any) {
-            const snippet = candidateContent ? candidateContent.substring(0, 100) : 'empty';
-            vscode.window.showErrorMessage(`Error confirming sync: ${error.message}. Content snippet: ${snippet}`);
+            if (error instanceof JsoncFilterMergeError) {
+                vscode.window.showErrorMessage(
+                    `Cannot apply sync for "${session.profile.name}": ${error.message}`
+                );
+            } else {
+                const snippet = candidateContent ? candidateContent.substring(0, 100) : 'empty';
+                vscode.window.showErrorMessage(`Error confirming sync: ${error.message}. Content snippet: ${snippet}`);
+            }
         } finally {
             await this.cleanupSession(true);
         }

@@ -9,7 +9,8 @@ import {
     assertJsonc,
     stripKeys,
     mergeBack,
-    JsoncFilterParseError
+    JsoncFilterParseError,
+    JsoncFilterMergeError
 } from './jsoncFilter';
 
 interface MultiSyncItem {
@@ -154,12 +155,12 @@ export class MultiSyncManager {
                 let localContent = localOriginal;
                 let remoteContent = remoteOriginal;
                 let parseError: string | undefined;
-                if (excludeKeys.length > 0 && localExists && remoteExists) {
+                if (excludeKeys.length > 0) {
                     try {
-                        assertJsonc(localOriginal, 'local');
-                        assertJsonc(remoteOriginal, 'remote');
-                        localContent = stripKeys(localOriginal, excludeKeys);
-                        remoteContent = stripKeys(remoteOriginal, excludeKeys);
+                        if (localExists) assertJsonc(localOriginal, 'local');
+                        if (remoteExists) assertJsonc(remoteOriginal, 'remote');
+                        if (localExists) localContent = stripKeys(localOriginal, excludeKeys);
+                        if (remoteExists) remoteContent = stripKeys(remoteOriginal, excludeKeys);
                     } catch (e) {
                         if (e instanceof JsoncFilterParseError) {
                             parseError = `excludeKeys active but ${e.side} is not valid JSONC: ${e.message}`;
@@ -304,13 +305,19 @@ export class MultiSyncManager {
         if (!item || item.busy || item.parseError) return;
 
         const candidateStripped = item.direction === 'download' ? item.remoteContent : item.localContent;
-        const candidateContent = item.excludeKeys.length > 0
-            ? mergeBack(
-                candidateStripped,
-                item.direction === 'download' ? item.localOriginal : item.remoteOriginal,
-                item.excludeKeys
-              )
-            : candidateStripped;
+        let candidateContent: string;
+        try {
+            candidateContent = item.excludeKeys.length > 0
+                ? mergeBack(
+                    candidateStripped,
+                    item.direction === 'download' ? item.localOriginal : item.remoteOriginal,
+                    item.excludeKeys
+                  )
+                : candidateStripped;
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to sync ${name}: ${error.message}`);
+            return;
+        }
 
         item.busy = true;
         this.render();
@@ -404,9 +411,15 @@ export class MultiSyncManager {
                 // The diff editor returned the stripped, possibly user-edited candidate.
                 // mergeBack the destination side's originals to produce final bytes.
                 const dest = result.direction === 'download' ? item.localOriginal : item.remoteOriginal;
-                const finalContent = item.excludeKeys.length > 0
-                    ? mergeBack(result.candidateContent, dest, item.excludeKeys)
-                    : result.candidateContent;
+                let finalContent: string;
+                try {
+                    finalContent = item.excludeKeys.length > 0
+                        ? mergeBack(result.candidateContent, dest, item.excludeKeys)
+                        : result.candidateContent;
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Failed to persist ${name}: ${error.message}`);
+                    return;
+                }
                 try {
                     await this.applySync(item, finalContent);
                     if (!this.panel) {
@@ -474,9 +487,10 @@ export class MultiSyncManager {
                 for (const u of uploadsNeedingDb) u._pendingFinalContent = undefined;
                 for (const it of this.items) it.busy = false;
                 this.render();
-                vscode.window.showErrorMessage(
-                    `Failed to commit uploads: ${error.message}. No changes were applied.`
-                );
+                const prefix = error instanceof JsoncFilterMergeError
+                    ? 'Failed to prepare uploads'
+                    : 'Failed to commit uploads';
+                vscode.window.showErrorMessage(`${prefix}: ${error.message}. No changes were applied.`);
                 return;
             }
         }
@@ -491,15 +505,21 @@ export class MultiSyncManager {
             }
             const localPath = SyncManager.resolvePath(item.profile.filePath);
             let content: string;
-            if (item.direction === 'download') {
-                content = item.excludeKeys.length > 0
-                    ? mergeBack(item.remoteContent, item.localOriginal, item.excludeKeys)
-                    : item.remoteContent;
-            } else {
-                content = item._pendingFinalContent
-                    ?? (item.excludeKeys.length > 0
-                        ? mergeBack(item.localContent, item.remoteOriginal, item.excludeKeys)
-                        : item.localContent);
+            try {
+                if (item.direction === 'download') {
+                    content = item.excludeKeys.length > 0
+                        ? mergeBack(item.remoteContent, item.localOriginal, item.excludeKeys)
+                        : item.remoteContent;
+                } else {
+                    content = item._pendingFinalContent
+                        ?? (item.excludeKeys.length > 0
+                            ? mergeBack(item.localContent, item.remoteOriginal, item.excludeKeys)
+                            : item.localContent);
+                }
+            } catch (e: any) {
+                failed.push({ item, error: e?.message ?? String(e) });
+                item._pendingFinalContent = undefined;
+                continue;
             }
             try {
                 fs.writeFileSync(localPath, content);

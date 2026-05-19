@@ -9,8 +9,17 @@ test('parsePaths splits dot-separated strings, trims, drops empty, dedupes, pres
     );
 });
 
-test('parsePaths drops segments that become empty after trim', () => {
+test('parsePaths drops whitespace-only lines', () => {
     assert.deepEqual(parsePaths(['', '   ', '\t']), []);
+});
+
+test('parsePaths rejects lines with empty segments (trailing/leading/double dots)', () => {
+    // "settings." should NOT silently become ["settings"] — that would match the
+    // wrong key. Reject the entry entirely.
+    assert.deepEqual(
+        parsePaths(['valid.path', 'trailing.', '.leading', 'with..double', '   .leading2', 'a.   .b']),
+        [['valid', 'path']]
+    );
 });
 
 test('parsePaths returns single-segment paths for top-level keys', () => {
@@ -112,7 +121,7 @@ test('stripKeys returns the input unchanged when paths array is empty', () => {
     assert.equal(stripKeys(input, []), input);
 });
 
-import { mergeBack } from '../src/jsoncFilter';
+import { mergeBack, JsoncFilterMergeError } from '../src/jsoncFilter';
 
 test('mergeBack restores a top-level filtered key from destination', () => {
     const candidate = '{"shared": "new"}';
@@ -175,4 +184,29 @@ test('mergeBack restores filtered key values of every JSON type', () => {
     assert.deepEqual(JSON.parse(out), {
         s: 'x', n: 3.14, b: true, nul: null, arr: [1, 2], obj: { k: 'v' }
     });
+});
+
+test('mergeBack throws JsoncFilterMergeError when destination has a value but candidate blocks restoration', () => {
+    // Filter path "a.secret"; destination has a.secret as a value, but candidate
+    // changed "a" to a scalar — restoration is impossible without overwriting
+    // user's edit. mergeBack must surface this rather than silently lose data.
+    const candidate = '{"a": "scalar"}';
+    const destination = '{"a": {"secret": "value"}}';
+    assert.throws(
+        () => mergeBack(candidate, destination, [['a', 'secret']]),
+        (err: unknown) => {
+            assert.ok(err instanceof JsoncFilterMergeError, 'expected JsoncFilterMergeError');
+            assert.deepEqual([...(err as JsoncFilterMergeError).path], ['a', 'secret']);
+            return true;
+        }
+    );
+});
+
+test('mergeBack silently no-ops when destination lacks path AND candidate cannot reach it', () => {
+    // No data to restore, and candidate's structure blocks the path. This is
+    // benign — destination is "empty" for this key, so the user's intent is met.
+    const candidate = '{"a": "scalar"}';
+    const destination = '{"a": "scalar-too"}';
+    const out = mergeBack(candidate, destination, [['a', 'secret']]);
+    assert.deepEqual(JSON.parse(out), { a: 'scalar' });
 });
