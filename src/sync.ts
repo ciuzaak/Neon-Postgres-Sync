@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
+import { KeyPath, parsePaths, assertJsonc, stripKeys, mergeBack, JsoncFilterParseError } from './jsoncFilter';
 
 export type SyncDirection = 'download' | 'upload';
 export type SyncOutcome = 'confirmed' | 'cancelled';
@@ -25,6 +26,7 @@ interface SyncSession {
     // (updating local files / issuing DB writes), so the default flow should skip them.
     externalResolver?: (outcome: SyncOutcome, candidateContent: string, direction: SyncDirection) => void;
     resolved?: boolean;
+    excludeKeys: KeyPath[];
 }
 
 export class SyncManager {
@@ -96,6 +98,27 @@ export class SyncManager {
                     const remoteExists = remoteData !== null;
                     const remoteContent = remoteData ?? '';
 
+                    const excludeKeys = parsePaths(Array.isArray(profile.excludeKeys) ? profile.excludeKeys : []);
+
+                    let localForCompare = localContent;
+                    let remoteForCompare = remoteContent;
+                    if (excludeKeys.length > 0 && localExists && remoteExists) {
+                        try {
+                            assertJsonc(localContent, 'local');
+                            assertJsonc(remoteContent, 'remote');
+                        } catch (e) {
+                            if (e instanceof JsoncFilterParseError) {
+                                vscode.window.showErrorMessage(
+                                    `Profile "${profile.name}" has excludeKeys but ${e.side} is not valid JSONC: ${e.message}`
+                                );
+                                return;
+                            }
+                            throw e;
+                        }
+                        localForCompare = stripKeys(localContent, excludeKeys);
+                        remoteForCompare = stripKeys(remoteContent, excludeKeys);
+                    }
+
                     if (!localExists && !remoteExists) {
                         vscode.window.showWarningMessage(
                             `Neither local file nor remote record exists for "${profile.name}".`
@@ -103,8 +126,9 @@ export class SyncManager {
                         return;
                     }
 
-                    if (localExists && remoteExists && localContent === remoteContent) {
-                        vscode.window.showInformationMessage('Content is identical. No sync needed.');
+                    if (localExists && remoteExists && localForCompare === remoteForCompare) {
+                        const suffix = excludeKeys.length > 0 ? ' after exclude' : '';
+                        vscode.window.showInformationMessage(`Content is identical${suffix}. No sync needed.`);
                         return;
                     }
 
@@ -128,7 +152,7 @@ export class SyncManager {
                         );
                     }
 
-                    await this.openDiff(profile, direction, localContent, remoteContent);
+                    await this.openDiff(profile, direction, localContent, remoteContent, { excludeKeys });
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Error starting sync: ${error.message}`);
                 }
@@ -147,7 +171,8 @@ export class SyncManager {
         profile: Profile,
         direction: SyncDirection,
         localContent: string,
-        remoteContent: string
+        remoteContent: string,
+        excludeKeys: KeyPath[] = []
     ): Promise<{ outcome: SyncOutcome; candidateContent: string; direction: SyncDirection }> {
         if (this.currentSession) {
             return Promise.reject(new Error('Another sync session is already active.'));
@@ -161,7 +186,8 @@ export class SyncManager {
             this.openDiff(profile, direction, localContent, remoteContent, {
                 externalResolver: resolver,
                 skipDefaultPersist: true,
-                suppressInfoMessages: true
+                suppressInfoMessages: true,
+                excludeKeys
             }).catch(reject);
         });
     }
@@ -187,7 +213,7 @@ export class SyncManager {
             if (choice !== 'Swap and Discard') return;
         }
 
-        const { profile, originalLocal, originalRemote, externalResolver } = session;
+        const { profile, originalLocal, originalRemote, externalResolver, excludeKeys } = session;
         const newDirection: SyncDirection = session.direction === 'download' ? 'upload' : 'download';
 
         this.isSwapping = true;
@@ -196,7 +222,8 @@ export class SyncManager {
             await this.openDiff(profile, newDirection, originalLocal, originalRemote, {
                 externalResolver,
                 skipDefaultPersist: externalResolver !== undefined,
-                suppressInfoMessages: externalResolver !== undefined
+                suppressInfoMessages: externalResolver !== undefined,
+                excludeKeys
             });
         } finally {
             this.isSwapping = false;
@@ -287,6 +314,7 @@ export class SyncManager {
             externalResolver?: SyncSession['externalResolver'];
             skipDefaultPersist?: boolean;
             suppressInfoMessages?: boolean;
+            excludeKeys?: KeyPath[];
         } = {}
     ): Promise<void> {
         const languageId = await this.getLanguageIdForFile(profile.filePath);
@@ -297,17 +325,21 @@ export class SyncManager {
         let rightPath: string;
         let title: string;
 
+        const excludeKeys = options.excludeKeys ?? [];
+        const stripIfNeeded = (text: string) =>
+            excludeKeys.length > 0 ? stripKeys(text, excludeKeys) : text;
+
         if (direction === 'download') {
             leftPath = path.join(os.tmpdir(), `local_${profile.name}_${stamp}${ext}`);
             rightPath = path.join(os.tmpdir(), `remote_${profile.name}_${stamp}${ext}`);
-            fs.writeFileSync(leftPath, localContent);
-            fs.writeFileSync(rightPath, remoteContent);
+            fs.writeFileSync(leftPath, stripIfNeeded(localContent));
+            fs.writeFileSync(rightPath, stripIfNeeded(remoteContent));
             title = `${profile.name}: Local ← Remote`;
         } else {
             leftPath = path.join(os.tmpdir(), `remote_${profile.name}_${stamp}${ext}`);
             rightPath = path.join(os.tmpdir(), `local_${profile.name}_${stamp}${ext}`);
-            fs.writeFileSync(leftPath, remoteContent);
-            fs.writeFileSync(rightPath, localContent);
+            fs.writeFileSync(leftPath, stripIfNeeded(remoteContent));
+            fs.writeFileSync(rightPath, stripIfNeeded(localContent));
             title = `${profile.name}: Remote ← Local`;
         }
 
@@ -328,7 +360,8 @@ export class SyncManager {
             tempFiles: [leftPath, rightPath],
             editorCloseDisposable: this.registerEditorCloseListener(),
             externalResolver: options.externalResolver,
-            resolved: false
+            resolved: false,
+            excludeKeys
         };
 
         await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
@@ -375,17 +408,19 @@ export class SyncManager {
                 return;
             }
 
+            const finalContent = this.applyMergeBack(session, candidateContent);
+
             if (session.externalResolver) {
-                this.resolveSession('confirmed', candidateContent);
+                this.resolveSession('confirmed', finalContent);
             } else {
                 const localFilePath = this.resolvePath(session.profile.filePath);
 
                 if (session.direction === 'download') {
-                    fs.writeFileSync(localFilePath, candidateContent);
+                    fs.writeFileSync(localFilePath, finalContent);
                     vscode.window.showInformationMessage(`Downloaded and saved to ${session.profile.filePath}`);
                 } else {
-                    await DatabaseService.updateRecord(session.profile, candidateContent);
-                    fs.writeFileSync(localFilePath, candidateContent);
+                    await DatabaseService.updateRecord(session.profile, finalContent);
+                    fs.writeFileSync(localFilePath, finalContent);
                     vscode.window.showInformationMessage(`Uploaded ${session.profile.name} to database and updated local file.`);
                 }
             }
@@ -482,5 +517,14 @@ export class SyncManager {
         } catch (e) {
             console.error(`Failed to set language for temp file`, e);
         }
+    }
+
+    private static applyMergeBack(session: SyncSession, candidateContent: string): string {
+        if (session.externalResolver) return candidateContent; // external caller will mergeBack
+        if (session.excludeKeys.length === 0) return candidateContent;
+        const destinationOriginal = session.direction === 'download'
+            ? session.originalLocal
+            : session.originalRemote;
+        return mergeBack(candidateContent, destinationOriginal, session.excludeKeys);
     }
 }
