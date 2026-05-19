@@ -111,3 +111,68 @@ test('stripKeys returns the input unchanged when paths array is empty', () => {
     const input = '{"a": 1}';
     assert.equal(stripKeys(input, []), input);
 });
+
+import { mergeBack } from '../src/jsoncFilter';
+
+test('mergeBack restores a top-level filtered key from destination', () => {
+    const candidate = '{"shared": "new"}';
+    const destination = '{"shared": "old", "secret": 42}';
+    const out = mergeBack(candidate, destination, [['secret']]);
+    assert.deepEqual(JSON.parse(out), { shared: 'new', secret: 42 });
+});
+
+test('mergeBack overrides candidate value at filtered path with destination value', () => {
+    const candidate = '{"a": 1, "k": "from-candidate"}'; // user accidentally kept "k"
+    const destination = '{"a": 0, "k": "from-destination"}';
+    const out = mergeBack(candidate, destination, [['k']]);
+    assert.deepEqual(JSON.parse(out), { a: 1, k: 'from-destination' });
+});
+
+test('mergeBack removes filtered key from candidate when destination lacks it', () => {
+    const candidate = '{"a": 1, "stale": true}';
+    const destination = '{"a": 0}';
+    const out = mergeBack(candidate, destination, [['stale']]);
+    assert.deepEqual(JSON.parse(out), { a: 1 });
+});
+
+test('mergeBack with neither side holding the filtered key is a no-op', () => {
+    const candidate = '{"a": 1}';
+    const destination = '{"a": 0}';
+    const out = mergeBack(candidate, destination, [['gone']]);
+    assert.deepEqual(JSON.parse(out), { a: 1 });
+});
+
+test('mergeBack restores a nested filtered key, building intermediates if needed', () => {
+    const candidate = '{"keep": true}';
+    const destination = '{"keep": false, "outer": {"inner": {"deep": "value"}}}';
+    const out = mergeBack(candidate, destination, [['outer', 'inner', 'deep']]);
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.keep, true);
+    assert.equal(parsed.outer.inner.deep, 'value');
+});
+
+test('mergeBack preserves comments in candidate', () => {
+    const candidate = `{
+    // user's comment
+    "shared": "new"
+}`;
+    const destination = '{"shared": "old", "secret": 1}';
+    const out = mergeBack(candidate, destination, [['secret']]);
+    assert.match(out, /\/\/ user's comment/);
+});
+
+test('mergeBack with empty paths array returns candidate unchanged', () => {
+    const candidate = '{"a": 1}';
+    assert.equal(mergeBack(candidate, '{"a": 2}', []), candidate);
+});
+
+test('mergeBack restores filtered key values of every JSON type', () => {
+    const candidate = '{}';
+    const destination = '{"s": "x", "n": 3.14, "b": true, "nul": null, "arr": [1, 2], "obj": {"k": "v"}}';
+    const out = mergeBack(candidate, destination, [
+        ['s'], ['n'], ['b'], ['nul'], ['arr'], ['obj']
+    ]);
+    assert.deepEqual(JSON.parse(out), {
+        s: 'x', n: 3.14, b: true, nul: null, arr: [1, 2], obj: { k: 'v' }
+    });
+});

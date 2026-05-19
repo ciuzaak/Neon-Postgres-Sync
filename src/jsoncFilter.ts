@@ -89,6 +89,46 @@ export function stripKeys(text: string, paths: ReadonlyArray<KeyPath>): string {
 }
 
 /**
+ * Returns `candidateText` with every path's value reset to whatever
+ * `destinationOriginal` holds at that same path:
+ *   - destination has path → set candidate at path to destination's value
+ *   - destination missing path → remove path from candidate (if present)
+ *
+ * Comments/formatting elsewhere in candidateText are preserved. Intermediate
+ * objects are created in candidate as needed (jsonc-parser modify default).
+ *
+ * Paths are processed deepest-first to keep edit offsets stable.
+ */
+export function mergeBack(
+    candidateText: string,
+    destinationOriginal: string,
+    paths: ReadonlyArray<KeyPath>
+): string {
+    if (paths.length === 0) return candidateText;
+
+    const destTree = jsoncParser.parseTree(destinationOriginal, [], PARSE_OPTIONS);
+
+    const ordered = [...paths].sort((a, b) => b.length - a.length);
+    let current = candidateText;
+    for (const path of ordered) {
+        const destNode = destTree ? jsoncParser.findNodeAtLocation(destTree, [...path]) : undefined;
+        const replacement = destNode ? jsoncParser.getNodeValue(destNode) : undefined;
+        // `replacement === undefined` deletes the key in candidate via modify().
+        let edits: jsoncParser.Edit[];
+        try {
+            edits = jsoncParser.modify(current, [...path], replacement, MODIFY_OPTIONS);
+        } catch {
+            // Path unreachable in candidate (e.g. intermediate is a scalar).
+            // Treat as no-op — consistent with stripKeys' behavior.
+            continue;
+        }
+        if (edits.length === 0) continue;
+        current = jsoncParser.applyEdits(current, edits);
+    }
+    return current;
+}
+
+/**
  * Normalize raw path strings (one per textarea line / one per JSON array entry)
  * into KeyPath arrays. Trims, splits on '.', drops empty results, dedupes by
  * full-path string equality, preserves first-seen order.
