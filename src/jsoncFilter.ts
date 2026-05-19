@@ -2,6 +2,63 @@ import * as jsoncParser from 'jsonc-parser';
 
 export type KeyPath = ReadonlyArray<string>;
 
+export class JsoncFilterParseError extends Error {
+    constructor(
+        public readonly side: 'local' | 'remote',
+        public readonly errors: ReadonlyArray<jsoncParser.ParseError>
+    ) {
+        super(`Failed to parse ${side} as JSONC: ${formatParseErrors(errors)}`);
+        this.name = 'JsoncFilterParseError';
+    }
+}
+
+const PARSE_OPTIONS: jsoncParser.ParseOptions = {
+    disallowComments: false,
+    allowTrailingComma: true,
+    allowEmptyContent: false
+};
+
+/**
+ * Throws JsoncFilterParseError if `text` is not parseable as JSONC (comments
+ * and trailing commas allowed, empty input rejected).
+ */
+export function assertJsonc(text: string, side: 'local' | 'remote'): void {
+    const errors: jsoncParser.ParseError[] = [];
+    jsoncParser.parse(text, errors, PARSE_OPTIONS);
+    if (errors.length > 0) {
+        throw new JsoncFilterParseError(side, errors);
+    }
+}
+
+function formatParseErrors(errors: ReadonlyArray<jsoncParser.ParseError>): string {
+    if (errors.length === 0) return 'unknown error';
+    return errors.map((e) => `${parseErrorCodeName(e.error)} at offset ${e.offset}`).join('; ');
+}
+
+function parseErrorCodeName(code: jsoncParser.ParseErrorCode): string {
+    // jsonc-parser exports ParseErrorCode as a numeric enum. Map the few we care
+    // about for nicer messages; fall back to the raw number otherwise.
+    const names: Record<number, string> = {
+        1: 'InvalidSymbol',
+        2: 'InvalidNumberFormat',
+        3: 'PropertyNameExpected',
+        4: 'ValueExpected',
+        5: 'ColonExpected',
+        6: 'CommaExpected',
+        7: 'CloseBraceExpected',
+        8: 'CloseBracketExpected',
+        9: 'EndOfFileExpected',
+        10: 'InvalidCommentToken',
+        11: 'UnexpectedEndOfComment',
+        12: 'UnexpectedEndOfString',
+        13: 'UnexpectedEndOfNumber',
+        14: 'InvalidUnicode',
+        15: 'InvalidEscapeCharacter',
+        16: 'InvalidCharacter'
+    };
+    return names[code] ?? `ParseErrorCode(${code})`;
+}
+
 /**
  * Normalize raw path strings (one per textarea line / one per JSON array entry)
  * into KeyPath arrays. Trims, splits on '.', drops empty results, dedupes by
