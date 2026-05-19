@@ -64,6 +64,7 @@ export class MultiSyncManager {
     private static panel: vscode.WebviewPanel | null = null;
     private static items: MultiSyncItem[] = [];
     private static activeDiffProfile: string | null = null;
+    private static confirmAllInFlight = false;
 
     static isActive(): boolean {
         return this.panel !== null;
@@ -432,6 +433,16 @@ export class MultiSyncManager {
     }
 
     private static async confirmAll(): Promise<void> {
+        if (this.confirmAllInFlight) return;
+        this.confirmAllInFlight = true;
+        try {
+            await this._confirmAllImpl();
+        } finally {
+            this.confirmAllInFlight = false;
+        }
+    }
+
+    private static async _confirmAllImpl(): Promise<void> {
         if (this.items.length === 0) return;
         for (const it of this.items) it.busy = true;
         this.render();
@@ -735,7 +746,6 @@ export class MultiSyncManager {
         text-overflow: ellipsis;
         white-space: nowrap;
     }
-    .row.has-error .direction, .row.has-error .stats { display: none; }
 </style>
 </head>
 <body>
