@@ -79,6 +79,44 @@ Example `neon-sync.json`:
 }
 ```
 
+### 4. Filtering keys (JSON/JSONC only)
+
+For JSON/JSONC profiles you can list keys that should be hidden from the diff and preserved on the target side on confirm. This is useful for machine-specific or transient keys (themes, machine IDs, locally chosen font sizes) that you don't want propagating across machines.
+
+Add `excludeKeys` to a profile (via the settings panel's Add/Edit modal → Advanced, or by editing `neon-sync.json` directly):
+
+```json
+{
+    "profiles": [
+        {
+            "name": "VS Code Settings",
+            "filePath": ".vscode/settings.json",
+            "id": "vscode-settings",
+            "tableName": "json_records",
+            "excludeKeys": [
+                "editor.fontSize",
+                "workbench.colorTheme",
+                "telemetry.machineId"
+            ]
+        }
+    ]
+}
+```
+
+Path syntax (v1):
+
+- Dot-separated string. `a.b.c` addresses `{ "a": { "b": { "c": ... } } }`.
+- Multiple paths supported; multi-level paths supported.
+- Wildcards (`a.*.b`), array indices, and keys containing literal dots are not supported in this release.
+
+Behavior:
+
+- **Diff view**: both sides are shown with the listed keys removed. Comments and formatting on remaining keys are preserved.
+- **Identical check**: if the only differences are filtered keys, the sync is treated as "already in sync" and skipped.
+- **Confirm**: the target side's current values for the filtered keys are spliced back in before writing. Locally edited values for filtered keys in the diff editor are also overwritten with the target's values (since these keys are "owned" by the target).
+- **Parse failure**: if either side does not parse as JSONC (comments and trailing commas allowed), the sync is aborted with an error. The multi-profile panel keeps the row visible with an inline error.
+- **No filter**: profiles without `excludeKeys` (or with an empty list) behave exactly as before — pure raw-text sync.
+
 ## Usage
 
 1. Run `Neon Sync: Sync File` and select a profile.

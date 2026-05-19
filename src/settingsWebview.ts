@@ -185,17 +185,36 @@ export class SettingsPanel {
         if (hasErrors(errors)) {
             return { command: 'profileSaveError', errors, originalName: message.originalName };
         }
+        const rawExcludes = Array.isArray((incoming as { excludeKeys?: unknown }).excludeKeys)
+            ? ((incoming as { excludeKeys?: unknown }).excludeKeys as unknown[])
+            : [];
+        const excludeKeys = this._normalizeExcludeKeys(rawExcludes);
         const cleaned: Profile = {
             name: values.name.trim(),
             filePath: values.filePath.trim(),
             id: values.id.trim(),
             tableName: values.tableName.trim()
         };
+        if (excludeKeys.length > 0) cleaned.excludeKeys = excludeKeys;
         const next: Profile[] = message.originalName !== undefined
             ? profiles.map((p) => (p.name === message.originalName ? cleaned : p))
             : [...profiles, cleaned];
         await ConfigManager.saveProfiles(next);
         return { command: 'profilesSaved', profiles: next };
+    }
+
+    private _normalizeExcludeKeys(raw: unknown[]): string[] {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const entry of raw) {
+            if (typeof entry !== 'string') continue;
+            const trimmed = entry.trim();
+            if (!trimmed) continue;
+            if (seen.has(trimmed)) continue;
+            seen.add(trimmed);
+            out.push(trimmed);
+        }
+        return out;
     }
 
     private async _handleDeleteProfile(webview: vscode.Webview, name: unknown): Promise<void> {
@@ -405,6 +424,25 @@ code {
     .ns-modal-backdrop, .ns-modal { animation: none; }
     * { transition: none !important; }
 }
+.ns-advanced { margin-top: 6px; }
+.ns-advanced__summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 0;
+    color: var(--vscode-descriptionForeground);
+    user-select: none;
+}
+.ns-advanced__summary:hover { color: var(--vscode-foreground); }
+.ns-advanced[open] > .ns-advanced__summary { margin-bottom: 6px; }
+.ns-input--textarea {
+    width: 100%;
+    min-height: 80px;
+    resize: vertical;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.95em;
+    line-height: 1.4;
+}
 `;
 
 const SETTINGS_BODY = `
@@ -489,6 +527,15 @@ const SETTINGS_BODY = `
                 <p class="ns-hint">Letters, numbers, and underscores. Optionally <code>schema.table</code>.</p>
                 <p class="ns-error" data-error-for="tableName" hidden></p>
             </div>
+            <details class="ns-advanced" id="pmAdvancedDetails">
+                <summary class="ns-advanced__summary">Advanced</summary>
+                <div class="ns-form-row">
+                    <label class="ns-label" for="pmExcludeKeys">Exclude keys (one per line, JSON/JSONC only)</label>
+                    <textarea class="ns-input ns-input--textarea" id="pmExcludeKeys" rows="4" autocomplete="off" spellcheck="false" placeholder="editor.fontSize&#10;workbench.colorTheme"></textarea>
+                    <p class="ns-hint">Paths use dot-separators (e.g. <code>a.b.c</code>). Filtered keys are hidden from the diff and preserved as-is on the target side at confirm time.</p>
+                    <p class="ns-hint" id="pmExcludeKeysExtWarning" hidden>Exclude keys only apply to JSON/JSONC files. The current path doesn't end in <code>.json</code> or <code>.jsonc</code> — filtering will only run if the file parses as JSONC at sync time.</p>
+                </div>
+            </details>
             <p class="ns-status ns-status--error" id="pmFormError" hidden></p>
         </div>
         <footer class="ns-modal__footer">
@@ -539,8 +586,34 @@ const SETTINGS_SCRIPT = `
         pmTableName: $('pmTableName'),
         pmCancel: $('pmCancel'),
         pmSave: $('pmSave'),
-        pmFormError: $('pmFormError')
+        pmFormError: $('pmFormError'),
+        pmExcludeKeys: $('pmExcludeKeys'),
+        pmExcludeKeysExtWarning: $('pmExcludeKeysExtWarning'),
+        pmAdvancedDetails: $('pmAdvancedDetails')
     };
+
+    function parseExcludeKeysFromTextarea(raw) {
+        const seen = new Set();
+        const out = [];
+        for (const line of (raw || '').split('\\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            if (seen.has(trimmed)) continue;
+            seen.add(trimmed);
+            out.push(trimmed);
+        }
+        return out;
+    }
+
+    function hasJsoncExtension(p) {
+        return /\\.(json|jsonc)$/i.test((p || '').trim());
+    }
+
+    function maybeShowExcludeWarning() {
+        const hasKeys = parseExcludeKeysFromTextarea(els.pmExcludeKeys.value).length > 0;
+        const looksLikeJson = hasJsoncExtension(els.pmFilePath.value);
+        els.pmExcludeKeysExtWarning.hidden = !(hasKeys && !looksLikeJson);
+    }
 
     // ---- Connection field ----
 
@@ -634,8 +707,12 @@ const SETTINGS_SCRIPT = `
             nameEl.textContent = profile.name;
             const metaEl = document.createElement('div');
             metaEl.className = 'ns-profile-card__meta';
-            metaEl.textContent = profile.filePath + '  ·  ' + profile.tableName;
-            metaEl.title = profile.filePath + '  ·  ' + profile.tableName;
+            const excludeCount = Array.isArray(profile.excludeKeys) ? profile.excludeKeys.length : 0;
+            const excludeBadge = excludeCount > 0
+                ? '  ·  excludes ' + excludeCount + (excludeCount === 1 ? ' key' : ' keys')
+                : '';
+            metaEl.textContent = profile.filePath + '  ·  ' + profile.tableName + excludeBadge;
+            metaEl.title = metaEl.textContent;
             main.appendChild(nameEl);
             main.appendChild(metaEl);
 
@@ -695,6 +772,10 @@ const SETTINGS_SCRIPT = `
         els.pmFilePath.value = existing ? existing.filePath : '';
         els.pmId.value = existing ? existing.id : '';
         els.pmTableName.value = existing ? existing.tableName : 'json_records';
+        const existingExcludes = existing && Array.isArray(existing.excludeKeys) ? existing.excludeKeys : [];
+        els.pmExcludeKeys.value = existingExcludes.join('\\n');
+        els.pmAdvancedDetails.open = existingExcludes.length > 0;
+        maybeShowExcludeWarning();
         clearFormErrors();
         els.modalBackdrop.hidden = false;
         setTimeout(() => els.pmName.focus(), 0);
@@ -715,7 +796,8 @@ const SETTINGS_SCRIPT = `
             name: els.pmName.value,
             filePath: els.pmFilePath.value,
             id: els.pmId.value,
-            tableName: els.pmTableName.value
+            tableName: els.pmTableName.value,
+            excludeKeys: parseExcludeKeysFromTextarea(els.pmExcludeKeys.value)
         };
     }
 
@@ -787,9 +869,11 @@ const SETTINGS_SCRIPT = `
     els.modalBackdrop.addEventListener('click', (e) => {
         if (e.target === els.modalBackdrop) closeProfileModal(false);
     });
-    for (const input of [els.pmName, els.pmFilePath, els.pmId, els.pmTableName]) {
+    for (const input of [els.pmName, els.pmFilePath, els.pmId, els.pmTableName, els.pmExcludeKeys]) {
         input.addEventListener('input', () => { state.modalDirty = true; });
     }
+    els.pmExcludeKeys.addEventListener('input', maybeShowExcludeWarning);
+    els.pmFilePath.addEventListener('input', maybeShowExcludeWarning);
 
     els.modal.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -851,6 +935,7 @@ const SETTINGS_SCRIPT = `
                 if (msg.path) {
                     els.pmFilePath.value = msg.path;
                     state.modalDirty = true;
+                    maybeShowExcludeWarning();
                 }
                 break;
             case 'focusField':
