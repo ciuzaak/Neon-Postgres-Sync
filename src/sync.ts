@@ -16,7 +16,9 @@ const AMBIGUOUS_TIMESTAMP_GAP_MS = 5_000;
 interface SyncSession {
     direction: SyncDirection;
     profile: Profile;
+    /** Raw (unstripped) local content — used for swap-direction and mergeBack. */
     originalLocal: string;
+    /** Raw (unstripped) remote content — used for swap-direction and mergeBack. */
     originalRemote: string;
     candidateUri: vscode.Uri; // Right side of diff — the editable/target content
     tempFiles: string[];
@@ -166,6 +168,14 @@ export class SyncManager {
      * chosen, so we skip the progress indicator, the identical-content early
      * return and the ambiguity prompt. Resolves once the user confirms, cancels
      * or closes the diff editor.
+     *
+     * When `excludeKeys` is non-empty, the diff editor shows the STRIPPED content
+     * (via openDiff's strip step) and the resolver receives the user-edited
+     * stripped candidate. The caller is then responsible for calling
+     * jsoncFilter.mergeBack against its own raw originals before persisting —
+     * SyncManager.applyMergeBack deliberately short-circuits for external resolvers
+     * because the caller's persistence boundary is wider (e.g. multi-sync's batch
+     * upload + per-row local write).
      */
     static openDiffForExternal(
         profile: Profile,
@@ -520,7 +530,12 @@ export class SyncManager {
     }
 
     private static applyMergeBack(session: SyncSession, candidateContent: string): string {
-        if (session.externalResolver) return candidateContent; // external caller will mergeBack
+        // External resolvers (e.g. MultiSyncManager) receive the raw candidate and
+        // are responsible for calling jsoncFilter.mergeBack themselves against their
+        // own cached originals. This split exists because multi-sync persists across
+        // a different transaction boundary and needs the merged bytes for both the
+        // remote upload AND the local write in a single coordinated step.
+        if (session.externalResolver) return candidateContent;
         if (session.excludeKeys.length === 0) return candidateContent;
         const destinationOriginal = session.direction === 'download'
             ? session.originalLocal
