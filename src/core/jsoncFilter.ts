@@ -70,17 +70,28 @@ function parseErrorCodeName(code: jsoncParser.ParseErrorCode): string {
     return names[code] ?? `ParseErrorCode(${code})`;
 }
 
+// ── Text surgery ─────────────────────────────────────────────────────────
+//
+// stripKeys / mergeBack edit the text directly rather than via jsonc-parser's
+// modify(): its delete swallows the neighbouring key's comments and its insert
+// moves them onto the new key's line — silent comment loss once written back.
+// Rules: every comment that isn't the removed property's own same-line comment
+// survives; line breaks are \n, \r\n or a bare \r (as jsonc-parser treats
+// them); duplicate keys resolve like JSON.parse (last wins).
+
+function isTrivia(kind: jsoncParser.SyntaxKind): boolean {
+    return kind === jsoncParser.SyntaxKind.Trivia
+        || kind === jsoncParser.SyntaxKind.LineBreakTrivia
+        || kind === jsoncParser.SyntaxKind.LineCommentTrivia
+        || kind === jsoncParser.SyntaxKind.BlockCommentTrivia;
+}
+
 /** First non-trivia token at or after `offset` (whitespace, line breaks and comments skipped). */
 function nextSignificantToken(text: string, offset: number): { kind: jsoncParser.SyntaxKind; offset: number } {
     const scanner = jsoncParser.createScanner(text.slice(offset), false);
     for (;;) {
         const kind = scanner.scan();
-        if (
-            kind !== jsoncParser.SyntaxKind.Trivia
-            && kind !== jsoncParser.SyntaxKind.LineBreakTrivia
-            && kind !== jsoncParser.SyntaxKind.LineCommentTrivia
-            && kind !== jsoncParser.SyntaxKind.BlockCommentTrivia
-        ) {
+        if (!isTrivia(kind)) {
             return { kind, offset: offset + scanner.getTokenOffset() };
         }
     }
@@ -91,123 +102,200 @@ function precedingComma(text: string, objectStart: number, offset: number): numb
     const scanner = jsoncParser.createScanner(text.slice(objectStart, offset), false);
     let lastSignificant: { kind: jsoncParser.SyntaxKind; offset: number } | undefined;
     for (let kind = scanner.scan(); kind !== jsoncParser.SyntaxKind.EOF; kind = scanner.scan()) {
-        if (
-            kind !== jsoncParser.SyntaxKind.Trivia
-            && kind !== jsoncParser.SyntaxKind.LineBreakTrivia
-            && kind !== jsoncParser.SyntaxKind.LineCommentTrivia
-            && kind !== jsoncParser.SyntaxKind.BlockCommentTrivia
-        ) {
+        if (!isTrivia(kind)) {
             lastSignificant = { kind, offset: objectStart + scanner.getTokenOffset() };
         }
     }
     return lastSignificant?.kind === jsoncParser.SyntaxKind.CommaToken ? lastSignificant.offset : -1;
 }
 
-/**
- * Edits that delete one object property while leaving every comment that
- * isn't the property's own in place. jsonc-parser's `modify(…, undefined)`
- * deletes from the previous comma, which swallows the neighbouring key's
- * trailing comment (and any comment lines above the removed key) — silent
- * data loss once the text is written back.
- *
- * Rules:
- * - The property's own span always goes, plus its trailing comma if any.
- * - If it sits alone on its line(s), the whole line goes, including a
- *   trailing `//` comment on that same line (that comment is about it).
- * - If it is the last property, the comma before it goes (just that one
- *   character; comments after the comma stay).
- */
-function propertyRemovalEdits(text: string, property: jsoncParser.Node): jsoncParser.Edit[] {
-    const start = property.offset;
-    const end = property.offset + property.length;
-    const next = nextSignificantToken(text, end);
-    const hasTrailingComma = next.kind === jsoncParser.SyntaxKind.CommaToken;
-    const removeTo = hasTrailingComma ? next.offset + 1 : end;
+const isBreak = (ch: string | undefined) => ch === '\n' || ch === '\r';
+const isBlank = (ch: string | undefined) => ch === ' ' || ch === '\t';
 
-    const lineStart = text.lastIndexOf('\n', start - 1) + 1;
-    const newline = text.indexOf('\n', removeTo);
-    const lineEnd = newline === -1 ? text.length : newline + 1;
-    const ownsLine = /^[ \t]*$/.test(text.slice(lineStart, start))
-        && /^[ \t]*(\/\/[^\n]*)?\r?\n?$/.test(text.slice(removeTo, lineEnd));
-
-    let inlineEnd = removeTo;
-    if (hasTrailingComma) {
-        while (text[inlineEnd] === ' ' || text[inlineEnd] === '\t') inlineEnd++;
-    }
-    const edits: jsoncParser.Edit[] = ownsLine
-        ? [{ offset: lineStart, length: lineEnd - lineStart, content: '' }]
-        : [{ offset: start, length: inlineEnd - start, content: '' }];
-
-    if (!hasTrailingComma && property.parent) {
-        const comma = precedingComma(text, property.parent.offset + 1, start);
-        if (comma !== -1) edits.push({ offset: comma, length: 1, content: '' });
-    }
-    return edits;
+/** Offset where the line containing `offset` starts. */
+function lineStartOf(text: string, offset: number): number {
+    let i = offset;
+    while (i > 0 && !isBreak(text[i - 1])) i--;
+    return i;
 }
 
-/**
- * Remove the property at `path` if it exists (no-op otherwise). Returns the
- * new text. Only object properties are addressable (see parsePaths).
- */
-function removeProperty(text: string, path: KeyPath): string {
-    const tree = jsoncParser.parseTree(text, [], PARSE_OPTIONS);
-    const valueNode = tree ? jsoncParser.findNodeAtLocation(tree, [...path]) : undefined;
-    const property = valueNode?.parent;
-    if (!property || property.type !== 'property') return text;
-    return jsoncParser.applyEdits(text, propertyRemovalEdits(text, property));
+/** Offset of the line break ending the line that contains `offset` (text.length if none). */
+function lineContentEndOf(text: string, offset: number): number {
+    let i = offset;
+    while (i < text.length && !isBreak(text[i])) i++;
+    return i;
+}
+
+/** Offset just past the line break at `i` (a no-op at end of text). */
+function pastLineBreak(text: string, i: number): number {
+    if (text[i] === '\r' && text[i + 1] === '\n') return i + 2;
+    return i < text.length ? i + 1 : i;
+}
+
+/** [from, to) holds only blanks and complete same-line comments. */
+function onlyInlineTrivia(text: string, from: number, to: number): boolean {
+    const scanner = jsoncParser.createScanner(text.slice(from, to), false);
+    for (let kind = scanner.scan(); kind !== jsoncParser.SyntaxKind.EOF; kind = scanner.scan()) {
+        if (scanner.getTokenError() !== jsoncParser.ScanError.None) return false; // e.g. unterminated /*
+        if (kind === jsoncParser.SyntaxKind.Trivia || kind === jsoncParser.SyntaxKind.LineCommentTrivia) continue;
+        if (kind === jsoncParser.SyntaxKind.BlockCommentTrivia && !/[\r\n]/.test(scanner.getTokenValue())) continue;
+        return false;
+    }
+    return true;
+}
+
+function detectEol(text: string): string {
+    if (text.includes('\r\n')) return '\r\n';
+    if (text.includes('\r')) return '\r';
+    return '\n';
+}
+
+/** The line break at `i` if there is one, else the document's usual one (mixed-EOL files stay stable). */
+function lineBreakAt(text: string, i: number): string {
+    if (text[i] === '\r' && text[i + 1] === '\n') return '\r\n';
+    return isBreak(text[i]) ? text[i] : detectEol(text);
 }
 
 /** Indent unit of the document: the first indented line's leading whitespace, else 4 spaces. */
 function detectIndentUnit(text: string): string {
-    const m = /\n([ \t]+)\S/.exec(text);
+    const m = /[\r\n]([ \t]+)\S/.exec(text);
     if (!m) return '    ';
     return m[1].startsWith('\t') ? '\t' : m[1];
 }
 
-function lineIndentIfOwnLine(text: string, offset: number): string | null {
-    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
-    const prefix = text.slice(lineStart, offset);
-    return /^[ \t]*$/.test(prefix) ? prefix : null;
+/** Leading whitespace of the line containing `offset`. */
+function indentOfLine(text: string, offset: number): string {
+    return /^[ \t]*/.exec(text.slice(lineStartOf(text, offset)))![0];
+}
+
+/** Whether `offset` is the first non-blank position on its line. */
+function startsLine(text: string, offset: number): boolean {
+    return /^[ \t]*$/.test(text.slice(lineStartOf(text, offset), offset));
+}
+
+/** Property nodes of `obj` whose key is `key`, in document order. */
+function propertiesNamed(obj: jsoncParser.Node, key: string): jsoncParser.Node[] {
+    return (obj.children ?? []).filter((p) => p.type === 'property' && p.children?.[0]?.value === key);
+}
+
+/** Value node at `path`, resolving duplicate keys like JSON.parse (last wins). */
+function findValue(root: jsoncParser.Node, path: KeyPath): jsoncParser.Node | undefined {
+    let node: jsoncParser.Node | undefined = root;
+    for (const segment of path) {
+        if (!node || node.type !== 'object') return undefined;
+        const props = propertiesNamed(node, segment);
+        node = props[props.length - 1]?.children?.[1];
+    }
+    return node;
+}
+
+/** Delete [start, end) — widened to whole lines when it has its line(s) to itself. */
+function spanOrLinesEdit(text: string, start: number, end: number): jsoncParser.Edit {
+    const lineEnd = lineContentEndOf(text, end);
+    if (startsLine(text, start) && onlyInlineTrivia(text, end, lineEnd)) {
+        const from = lineStartOf(text, start);
+        return { offset: from, length: pastLineBreak(text, lineEnd) - from, content: '' };
+    }
+    return { offset: start, length: end - start, content: '' };
+}
+
+/** Edits deleting one object property; see the rules above. */
+function propertyRemovalEdits(text: string, property: jsoncParser.Node): jsoncParser.Edit[] {
+    const start = property.offset;
+    const end = property.offset + property.length;
+    const next = nextSignificantToken(text, end);
+
+    if (next.kind === jsoncParser.SyntaxKind.CommaToken) {
+        const comma = next.offset;
+        if (!/^[ \t]*$/.test(text.slice(end, comma))) {
+            // Comments or line breaks sit between the value and its comma:
+            // delete the property and the comma separately, keeping them.
+            return [spanOrLinesEdit(text, start, end), { offset: comma, length: 1, content: '' }];
+        }
+        const whole = spanOrLinesEdit(text, start, comma + 1);
+        if (whole.offset !== start) return [whole];
+        // Inline: take the blanks after the comma too — or, when this was the
+        // last property (trailing comma), the blanks before it instead.
+        let from = start;
+        let to = comma + 1;
+        if (nextSignificantToken(text, to).kind === jsoncParser.SyntaxKind.CloseBraceToken) {
+            while (from > 0 && isBlank(text[from - 1])) from--;
+        } else {
+            while (isBlank(text[to])) to++;
+        }
+        return [{ offset: from, length: to - from, content: '' }];
+    }
+
+    // Last property without a trailing comma: the comma before it goes too.
+    const prev = property.parent ? precedingComma(text, property.parent.offset + 1, start) : -1;
+    const own = spanOrLinesEdit(text, start, end);
+    if (prev === -1) return [own];
+    if (own.offset === start && /^[ \t]*$/.test(text.slice(prev + 1, start))) {
+        return [{ offset: prev, length: end - prev, content: '' }]; // inline `, "k": v`
+    }
+    return [own, { offset: prev, length: 1, content: '' }];
 }
 
 /**
- * Edits that append `"key": rawValue` as the last property of `obj`,
- * keeping every existing comment attached to its line. jsonc-parser's
- * insertion puts the separating comma after the last value's trailing
- * comment position, which moves `"a": 1 // note` onto the new key's line —
- * and a later strip of that key then deletes the note.
+ * Remove every property at `path` (all duplicates, so no shadowed copy is
+ * left to take effect); no-op if absent or unreachable. Only object
+ * properties are addressable (see parsePaths).
+ */
+function removeProperty(text: string, path: KeyPath): string {
+    let current = text;
+    for (let guard = 0; guard < 1000; guard++) {
+        const tree = jsoncParser.parseTree(current, [], PARSE_OPTIONS);
+        const parent = tree && (path.length === 1 ? tree : findValue(tree, path.slice(0, -1)));
+        if (!parent || parent.type !== 'object') return current;
+        const props = propertiesNamed(parent, path[path.length - 1]);
+        if (props.length === 0) return current;
+        current = jsoncParser.applyEdits(current, propertyRemovalEdits(current, props[props.length - 1]));
+    }
+    return current;
+}
+
+/**
+ * Edits appending `"key": rawValue` as the last property of `obj`: the
+ * separating comma goes right after the last value, the new member on its
+ * own line after that line's trailing comments, matching the indentation
+ * and trailing-comma style already in use.
  */
 function propertyInsertEdits(text: string, obj: jsoncParser.Node, key: string, rawValue: string): jsoncParser.Edit[] {
-    const eol = text.includes('\r\n') ? '\r\n' : '\n';
-    const member = `${JSON.stringify(key)}: ${rawValue}`;
     const children = obj.children ?? [];
+    const memberWith = (eol: string) => `${JSON.stringify(key)}: ${rawValue.replace(/\r\n|\r|\n/g, eol)}`;
 
     if (children.length === 0) {
         const open = obj.offset + 1;
-        const body = text.slice(open, obj.offset + obj.length - 1);
-        if (!body.includes('\n')) {
-            return [{ offset: open, length: 0, content: member }];
+        const close = obj.offset + obj.length - 1;
+        if (!/[\r\n]/.test(text.slice(open, close))) {
+            return [{ offset: open, length: 0, content: memberWith(detectEol(text)) }];
         }
-        const objIndent = lineIndentIfOwnLine(text, obj.offset) ?? (text.slice(text.lastIndexOf('\n', obj.offset - 1) + 1).match(/^[ \t]*/)![0]);
-        return [{ offset: open, length: 0, content: `${eol}${objIndent}${detectIndentUnit(text)}${member}` }];
+        const lineEnd = lineContentEndOf(text, open);
+        const at = onlyInlineTrivia(text, open, lineEnd) ? lineEnd : open;
+        const eol = lineBreakAt(text, lineEnd);
+        return [{ offset: at, length: 0, content: `${eol}${indentOfLine(text, obj.offset)}${detectIndentUnit(text)}${memberWith(eol)}` }];
     }
 
     const last = children[children.length - 1];
     const lastEnd = last.offset + last.length;
     const next = nextSignificantToken(text, lastEnd);
-    const hasTrailingComma = next.kind === jsoncParser.SyntaxKind.CommaToken;
-    const anchor = hasTrailingComma ? next.offset + 1 : lastEnd;
-    const commaEdit: jsoncParser.Edit[] = hasTrailingComma ? [] : [{ offset: lastEnd, length: 0, content: ',' }];
+    const trailingComma = next.kind === jsoncParser.SyntaxKind.CommaToken;
+    const anchor = trailingComma ? next.offset + 1 : lastEnd;
+    const suffix = trailingComma ? ',' : '';
 
-    const indent = lineIndentIfOwnLine(text, last.offset);
-    const newline = text.indexOf('\n', anchor);
-    if (indent !== null && newline !== -1) {
-        const lineContentEnd = text[newline - 1] === '\r' ? newline - 1 : newline;
-        if (/^[ \t]*(\/\/[^\n]*)?$/.test(text.slice(anchor, lineContentEnd))) {
-            return [...commaEdit, { offset: lineContentEnd, length: 0, content: `${eol}${indent}${member}` }];
-        }
+    // Whenever the rest of the anchor's line is only blanks/comments, start a
+    // new line after it — inserting inline would put the new key in front of
+    // that line's trailing comment, which would then count as the new key's own.
+    const lineEnd = lineContentEndOf(text, anchor);
+    if (lineEnd < text.length && onlyInlineTrivia(text, anchor, lineEnd)) {
+        const eol = lineBreakAt(text, lineEnd);
+        const indent = startsLine(text, last.offset)
+            ? indentOfLine(text, last.offset)
+            : indentOfLine(text, obj.offset) + detectIndentUnit(text);
+        const insert = { offset: lineEnd, length: 0, content: `${eol}${indent}${memberWith(eol)}${suffix}` };
+        return trailingComma ? [insert] : [{ offset: lastEnd, length: 0, content: ',' }, insert];
     }
-    return [...commaEdit, { offset: anchor, length: 0, content: ` ${member}` }];
+    return [{ offset: anchor, length: 0, content: `${trailingComma ? '' : ','} ${memberWith(detectEol(text))}${suffix}` }];
 }
 
 /**
@@ -222,15 +310,16 @@ function setRawValue(text: string, path: KeyPath, rawValue: string): string {
         throw new JsoncFilterMergeError(path, new Error('candidate root is not an object'));
     }
 
-    const existing = jsoncParser.findNodeAtLocation(tree, [...path]);
+    const existing = findValue(tree, path);
     if (existing) {
-        return jsoncParser.applyEdits(text, [{ offset: existing.offset, length: existing.length, content: rawValue }]);
+        const content = rawValue.replace(/\r\n|\r|\n/g, detectEol(text));
+        return jsoncParser.applyEdits(text, [{ offset: existing.offset, length: existing.length, content }]);
     }
 
     let obj = tree;
     let depth = 0;
     for (; depth < path.length - 1; depth++) {
-        const child = jsoncParser.findNodeAtLocation(obj, [path[depth]]);
+        const child = findValue(obj, [path[depth]]);
         if (!child) break;
         if (child.type !== 'object') {
             throw new JsoncFilterMergeError(path, new Error(`"${path.slice(0, depth + 1).join('.')}" is not an object`));
@@ -285,7 +374,7 @@ export function mergeBack(
     const ordered = [...paths].sort((a, b) => b.length - a.length);
     let current = candidateText;
     for (const path of ordered) {
-        const destNode = destTree ? jsoncParser.findNodeAtLocation(destTree, [...path]) : undefined;
+        const destNode = destTree ? findValue(destTree, path) : undefined;
         if (!destNode) {
             // Destination has no value: delete from candidate without eating
             // neighbouring comments. No-op if candidate can't reach the path.

@@ -141,7 +141,7 @@ test('stripKeys removes a multi-line value and a nested key', () => {
         JSON.parse(stripKeys('{\n    "a": 1,\n    "obj": {\n        "x": [1,\n 2]\n    },\n    "z": 3\n}', [['obj']])),
         { a: 1, z: 3 }
     );
-    assert.equal(stripKeys('{"o": {"k": 1, "theme": 2}}', [['o', 'theme']]), '{"o": {"k": 1 }}');
+    assert.equal(stripKeys('{"o": {"k": 1, "theme": 2}}', [['o', 'theme']]), '{"o": {"k": 1}}');
 });
 
 test('stripKeys tolerates trailing commas in the input', () => {
@@ -197,7 +197,7 @@ test('mergeBack appends a restored key after a trailing comment, not before it',
 });
 
 test('mergeBack insertion respects trailing commas, inline objects, empty objects, CRLF and tabs', () => {
-    assert.equal(mergeBack('{\n    "a": 1, // c\n}', '{"t": 1}', [['t']]), '{\n    "a": 1, // c\n    "t": 1\n}');
+    assert.equal(mergeBack('{\n    "a": 1, // c\n}', '{"t": 1}', [['t']]), '{\n    "a": 1, // c\n    "t": 1,\n}', 'keeps trailing-comma style');
     assert.equal(mergeBack('{"a": 1}', '{"t": "x"}', [['t']]), '{"a": 1, "t": "x"}');
     assert.equal(mergeBack('{}', '{"t": "x"}', [['t']]), '{"t": "x"}');
     assert.equal(mergeBack('{\n}', '{"t": "x"}', [['t']]), '{\n    "t": "x"\n}');
@@ -226,6 +226,54 @@ test('strip → merge round trip reproduces the original projection exactly', ()
     const local = '{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n';
     const after = mergeBack(stripKeys(local, K), '{\n    "fontSize": 16,\n    "theme": "light"\n}\n', K);
     assert.equal(stripKeys(after, K), stripKeys(local, K));
+});
+
+// ── regressions found by fuzzing ───────────────────────────────────────
+
+test('fuzz: a comment right after `{` stays put when a key is restored into the emptied object', () => {
+    const K = [['editor', 'fontSize']];
+    const local = '{\n  "editor": { // per machine\n    "fontSize": 14\n  }\n}';
+    const stripped = stripKeys(local, K);
+    assert.equal(stripped, '{\n  "editor": { // per machine\n  }\n}');
+    const merged = mergeBack(stripped, '{"editor": {"fontSize": 16}}', K);
+    assert.equal(merged, '{\n  "editor": { // per machine\n    "fontSize": 16\n  }\n}');
+    assert.equal(stripKeys(merged, K), stripped);
+});
+
+test('fuzz: a comment between a value and a comma on a later line survives removal', () => {
+    assert.equal(
+        stripKeys('{\n  "k": 1\n  // about b\n  , "b": 2\n}', [['k']]),
+        '{\n  // about b\n   "b": 2\n}'
+    );
+    assert.deepEqual(JSON.parse(stripKeys('{"c":6\n/**/,}', [['c']]).replace(/\/\*\*\//, '')), {});
+    assert.match(stripKeys('{"c":6\n/**/,}', [['c']]), /\/\*\*\//);
+});
+
+test('fuzz: bare CR line endings are line breaks', () => {
+    assert.equal(stripKeys('{\n  "k": 1, // c\r  "b": 2\n}', [['k']]), '{\n  "b": 2\n}');
+    const merged = mergeBack('{\n  "x": {\n    "a": 1 // c\r  }, "b": 2\n}', '{"x":{"k":3}}', [['x', 'k']]);
+    assert.deepEqual(JSON.parse(merged.replace(/\/\/[^\r\n]*/g, '')), { x: { a: 1, k: 3 }, b: 2 });
+    assert.match(merged, /"a": 1, \/\/ c\r    "k": 3\r/);
+});
+
+test('fuzz: duplicate keys resolve like JSON.parse (last wins) and are stripped entirely', () => {
+    assert.equal(stripKeys('{"a":0,"a":1}', [['a']]), '{}');
+    assert.deepEqual(JSON.parse(mergeBack('{}', '{"b":9,"b":1}', [['b']])), { b: 1 });
+    assert.deepEqual(JSON.parse(mergeBack('{"k":"x","k":"y"}', '{"k":"r"}', [['k']])), { k: 'r' });
+});
+
+test('fuzz: trailing-comma style survives a strip → merge → strip round trip', () => {
+    const K = [['k']];
+    for (const local of ['{\n  "a": 1,\n  "k": 2,\n}', '{"a": 1, "k": 2,}', '{ "a": 1, "b": 3, "k": 2 }', '{"theme":"x","a":2}']) {
+        const stripped = stripKeys(local, K);
+        assert.equal(stripKeys(mergeBack(stripped, '{"k": 3}', K), K), stripped, local);
+    }
+});
+
+test('fuzz: a key restored after a trailing line comment does not adopt it', () => {
+    const K = [['a'], ['b']];
+    const out = mergeBack('{"b":""\n,//\n}', '{"a":""}', K);
+    assert.match(stripKeys(out, K), /\/\//);
 });
 
 test('mergeBack with neither side holding the filtered key is a no-op', () => {
