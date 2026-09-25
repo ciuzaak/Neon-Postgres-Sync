@@ -1,6 +1,6 @@
 import test = require('node:test');
 import assert = require('node:assert/strict');
-import { parsePaths } from '../src/jsoncFilter';
+import { parsePaths } from '../../src/core/jsoncFilter';
 
 test('parsePaths splits dot-separated strings, trims, drops empty, dedupes, preserves order', () => {
     assert.deepEqual(
@@ -32,7 +32,7 @@ test('parsePaths is non-destructive on the input array', () => {
     assert.deepEqual(input, ['a.b', 'a.b']);
 });
 
-import { assertJsonc, JsoncFilterParseError } from '../src/jsoncFilter';
+import { assertJsonc, JsoncFilterParseError } from '../../src/core/jsoncFilter';
 
 test('assertJsonc accepts plain JSON', () => {
     assertJsonc('{"a": 1, "b": [1, 2]}', 'local');
@@ -69,7 +69,7 @@ test('assertJsonc treats a whitespace-only string as invalid', () => {
     assert.throws(() => assertJsonc('   \n\t', 'local'), JsoncFilterParseError);
 });
 
-import { stripKeys } from '../src/jsoncFilter';
+import { stripKeys } from '../../src/core/jsoncFilter';
 
 test('stripKeys removes a single top-level key', () => {
     const out = stripKeys('{"a": 1, "b": 2}', [['a']]);
@@ -121,7 +121,7 @@ test('stripKeys returns the input unchanged when paths array is empty', () => {
     assert.equal(stripKeys(input, []), input);
 });
 
-import { mergeBack, JsoncFilterMergeError } from '../src/jsoncFilter';
+import { mergeBack, JsoncFilterMergeError } from '../../src/core/jsoncFilter';
 
 test('mergeBack restores a top-level filtered key from destination', () => {
     const candidate = '{"shared": "new"}';

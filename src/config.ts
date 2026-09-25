@@ -1,22 +1,12 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { CONFIG_FILENAME, ConfigFileParseError, ConfigFileStore } from './core/configFile';
+import type { ConfigFile, Profile } from './core/types';
 
-export interface Profile {
-    name: string;
-    filePath: string;
-    id: string;
-    tableName: string;
-    excludeKeys?: string[];
-}
-
-export interface ConfigFile {
-    connectionString?: string; // Deprecated, but kept for migration/fallback
-    profiles: Profile[];
-}
+export type { ConfigFile, Profile } from './core/types';
 
 export class ConfigManager {
-    private static readonly CONFIG_FILENAME = 'neon-sync.json';
     private static readonly SECRET_KEY = 'neonSync.connectionString';
     private static globalStorageUri: vscode.Uri | undefined;
     private static secrets: vscode.SecretStorage | undefined;
@@ -32,24 +22,23 @@ export class ConfigManager {
         }
     }
 
-    private static getConfigPath(): string | undefined {
+    private static getStore(): ConfigFileStore | undefined {
         if (!this.globalStorageUri) {
             return undefined;
         }
-        return path.join(this.globalStorageUri.fsPath, this.CONFIG_FILENAME);
+        return new ConfigFileStore(path.join(this.globalStorageUri.fsPath, CONFIG_FILENAME));
     }
 
     private static readConfig(): ConfigFile | undefined {
-        const configPath = this.getConfigPath();
-        if (configPath && fs.existsSync(configPath)) {
-            try {
-                const content = fs.readFileSync(configPath, 'utf-8');
-                return JSON.parse(content);
-            } catch (e) {
-                vscode.window.showErrorMessage(`Failed to parse ${this.CONFIG_FILENAME}: ${e}`);
+        try {
+            return this.getStore()?.read();
+        } catch (e) {
+            if (e instanceof ConfigFileParseError) {
+                vscode.window.showErrorMessage(e.message);
+                return undefined;
             }
+            throw e;
         }
-        return undefined;
     }
 
     static getProfiles(): Profile[] {
@@ -135,84 +124,49 @@ export class ConfigManager {
     }
 
     private static async removeConnectionStringFromFile() {
-        const configPath = this.getConfigPath();
-        if (configPath && fs.existsSync(configPath)) {
-            const config = this.readConfig();
-            if (config && config.connectionString) {
-                delete config.connectionString;
-                this.atomicWriteJson(configPath, config);
-            }
+        try {
+            this.getStore()?.removeConnectionString();
+        } catch (e) {
+            if (!(e instanceof ConfigFileParseError)) throw e;
+            vscode.window.showErrorMessage(e.message);
         }
     }
 
     static async saveProfiles(profiles: Profile[]): Promise<void> {
-        const configPath = this.getConfigPath();
-        if (!configPath) {
+        const store = this.getStore();
+        if (!store) {
             vscode.window.showErrorMessage('Extension not initialized correctly.');
             return;
         }
 
-        let config: ConfigFile = { profiles: [] };
-        if (fs.existsSync(configPath)) {
-            config = this.readConfig() || { profiles: [] };
-        }
-        config.profiles = profiles.map((p) => this.normalizeProfileForWrite(p));
-        this.atomicWriteJson(configPath, config);
-    }
-
-    private static normalizeProfileForWrite(profile: Profile): Profile {
-        const cleaned: Profile = {
-            name: profile.name,
-            filePath: profile.filePath,
-            id: profile.id,
-            tableName: profile.tableName
-        };
-        if (Array.isArray(profile.excludeKeys) && profile.excludeKeys.length > 0) {
-            cleaned.excludeKeys = [...profile.excludeKeys];
-        }
-        return cleaned;
-    }
-
-    /**
-     * Write JSON to a sibling temp file then rename into place. Prevents
-     * leaving the config truncated/empty if the process is killed mid-write.
-     */
-    private static atomicWriteJson(targetPath: string, value: unknown): void {
-        const tempPath = `${targetPath}.${process.pid}.tmp`;
-        fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
-        try {
-            fs.renameSync(tempPath, targetPath);
-        } catch (error) {
-            // Best-effort cleanup; rethrow so callers see the failure.
-            try { fs.unlinkSync(tempPath); } catch { /* swallow */ }
-            throw error;
-        }
+        // readConfig surfaces a parse error and falls back to an empty base,
+        // matching the pre-core behavior of overwriting a corrupt file.
+        store.saveProfiles(profiles, this.readConfig() ?? { profiles: [] });
     }
 
     static async openConfigFile(): Promise<void> {
-        const configPath = this.getConfigPath();
-        if (!configPath) {
+        const store = this.getStore();
+        if (!store) {
             vscode.window.showErrorMessage('Extension not initialized correctly.');
             return;
         }
 
-        if (!fs.existsSync(configPath)) {
-            const initialConfig: ConfigFile = {
-                profiles: [
-                    {
-                        name: "Example Profile",
-                        filePath: "example.json",
-                        id: "example-id",
-                        tableName: "json_records"
-                    }
-                ]
-            };
-            fs.writeFileSync(configPath, JSON.stringify(initialConfig, null, 2));
-            vscode.window.showInformationMessage(`Created ${this.CONFIG_FILENAME} in global storage.`);
+        const created = store.ensureExists({
+            profiles: [
+                {
+                    name: "Example Profile",
+                    filePath: "example.json",
+                    id: "example-id",
+                    tableName: "json_records"
+                }
+            ]
+        });
+        if (created) {
+            vscode.window.showInformationMessage(`Created ${CONFIG_FILENAME} in global storage.`);
         }
 
         // Open the file
-        const doc = await vscode.workspace.openTextDocument(configPath);
+        const doc = await vscode.workspace.openTextDocument(store.filePath);
         await vscode.window.showTextDocument(doc);
     }
 }

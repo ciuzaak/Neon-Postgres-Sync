@@ -2,16 +2,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
-import { SyncManager, SyncDirection } from './sync';
-import {
-    KeyPath,
-    parsePaths,
-    assertJsonc,
-    stripKeys,
-    mergeBack,
-    JsoncFilterParseError,
-    JsoncFilterMergeError
-} from './jsoncFilter';
+import { SyncManager } from './sync';
+import { KeyPath, stripKeys, JsoncFilterMergeError } from './core/jsoncFilter';
+import { readLocalFile } from './core/localFile';
+import { planSync, candidateFor, finalizeCandidate, computeDiffStats } from './core/plan';
+import type { SyncDirection } from './core/types';
 
 interface MultiSyncItem {
     profile: Profile;
@@ -138,68 +133,33 @@ export class MultiSyncManager {
             const remotes = await DatabaseService.fetchRecordsWithMeta(profiles);
 
             return profiles.map((profile, idx) => {
-                const { data: remoteData, updateTime: remoteUpdateTime } = remotes[idx];
-                const absolutePath = SyncManager.resolvePath(profile.filePath);
-                const localExists = fs.existsSync(absolutePath);
-                let localOriginal = '';
-                let localMtime: Date | null = null;
-                if (localExists) {
-                    localOriginal = fs.readFileSync(absolutePath, 'utf-8');
-                    localMtime = fs.statSync(absolutePath).mtime;
-                }
-                const remoteExists = remoteData !== null;
-                const remoteOriginal = remoteData ?? '';
-
-                const excludeKeys = parsePaths(Array.isArray(profile.excludeKeys) ? profile.excludeKeys : []);
-
-                let localContent = localOriginal;
-                let remoteContent = remoteOriginal;
-                let parseError: string | undefined;
-                if (excludeKeys.length > 0) {
-                    try {
-                        if (localExists) assertJsonc(localOriginal, 'local');
-                        if (remoteExists) assertJsonc(remoteOriginal, 'remote');
-                        if (localExists) localContent = stripKeys(localOriginal, excludeKeys);
-                        if (remoteExists) remoteContent = stripKeys(remoteOriginal, excludeKeys);
-                    } catch (e) {
-                        if (e instanceof JsoncFilterParseError) {
-                            parseError = `excludeKeys active but ${e.side} is not valid JSONC: ${e.message}`;
-                        } else {
-                            throw e;
-                        }
-                    }
-                }
-
-                const suggestion = SyncManager.decideSyncDirection(
-                    localExists,
-                    remoteExists,
-                    localMtime,
-                    remoteUpdateTime
-                );
-
-                const { added, removed } = this.computeDiffStats(
-                    localContent,
-                    remoteContent,
-                    suggestion.direction
+                const local = readLocalFile(SyncManager.resolvePath(profile.filePath));
+                const plan = planSync(profile, local, remotes[idx]);
+                const { added, removed } = computeDiffStats(
+                    plan.localContent,
+                    plan.remoteContent,
+                    plan.suggestion.direction
                 );
 
                 return {
                     profile,
-                    localContent,
-                    remoteContent,
-                    localOriginal,
-                    remoteOriginal,
-                    excludeKeys,
-                    localExists,
-                    remoteExists,
-                    direction: suggestion.direction,
-                    ambiguous: suggestion.ambiguous,
-                    reason: suggestion.reason,
+                    localContent: plan.localContent,
+                    remoteContent: plan.remoteContent,
+                    localOriginal: plan.localOriginal,
+                    remoteOriginal: plan.remoteOriginal,
+                    excludeKeys: plan.excludeKeys,
+                    localExists: plan.localExists,
+                    remoteExists: plan.remoteExists,
+                    direction: plan.suggestion.direction,
+                    ambiguous: plan.suggestion.ambiguous,
+                    reason: plan.suggestion.reason,
                     added,
                     removed,
                     busy: false,
                     remotePersisted: false,
-                    parseError
+                    parseError: plan.parseError
+                        ? `excludeKeys active but ${plan.parseError.side} is not valid JSONC: ${plan.parseError.message}`
+                        : undefined
                 };
             });
         } catch (error: any) {
@@ -292,7 +252,7 @@ export class MultiSyncManager {
         const item = this.findItem(name);
         if (!item || item.busy) return;
         item.direction = item.direction === 'download' ? 'upload' : 'download';
-        const stats = this.computeDiffStats(item.localContent, item.remoteContent, item.direction);
+        const stats = computeDiffStats(item.localContent, item.remoteContent, item.direction);
         item.added = stats.added;
         item.removed = stats.removed;
         // Manual override resolves ambiguity
@@ -304,16 +264,9 @@ export class MultiSyncManager {
         const item = this.findItem(name);
         if (!item || item.busy || item.parseError) return;
 
-        const candidateStripped = item.direction === 'download' ? item.remoteContent : item.localContent;
         let candidateContent: string;
         try {
-            candidateContent = item.excludeKeys.length > 0
-                ? mergeBack(
-                    candidateStripped,
-                    item.direction === 'download' ? item.localOriginal : item.remoteOriginal,
-                    item.excludeKeys
-                  )
-                : candidateStripped;
+            candidateContent = finalizeCandidate(candidateFor(item, item.direction), item.direction, item);
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to sync ${name}: ${error.message}`);
             return;
@@ -377,7 +330,7 @@ export class MultiSyncManager {
             item.remoteContent = finalBytes;
         }
         item.remotePersisted = true;
-        const stats = this.computeDiffStats(item.localContent, item.remoteContent, item.direction);
+        const stats = computeDiffStats(item.localContent, item.remoteContent, item.direction);
         item.added = stats.added;
         item.removed = stats.removed;
     }
@@ -410,12 +363,9 @@ export class MultiSyncManager {
                 item.direction = result.direction;
                 // The diff editor returned the stripped, possibly user-edited candidate.
                 // mergeBack the destination side's originals to produce final bytes.
-                const dest = result.direction === 'download' ? item.localOriginal : item.remoteOriginal;
                 let finalContent: string;
                 try {
-                    finalContent = item.excludeKeys.length > 0
-                        ? mergeBack(result.candidateContent, dest, item.excludeKeys)
-                        : result.candidateContent;
+                    finalContent = finalizeCandidate(result.candidateContent, result.direction, item);
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to persist ${name}: ${error.message}`);
                     return;
@@ -473,9 +423,7 @@ export class MultiSyncManager {
         if (uploadsNeedingDb.length > 0) {
             try {
                 const payloads = uploadsNeedingDb.map((i) => {
-                    const data = i.excludeKeys.length > 0
-                        ? mergeBack(i.localContent, i.remoteOriginal, i.excludeKeys)
-                        : i.localContent;
+                    const data = finalizeCandidate(i.localContent, 'upload', i);
                     i._pendingFinalContent = data;
                     return { profile: i.profile, data };
                 });
@@ -506,16 +454,8 @@ export class MultiSyncManager {
             const localPath = SyncManager.resolvePath(item.profile.filePath);
             let content: string;
             try {
-                if (item.direction === 'download') {
-                    content = item.excludeKeys.length > 0
-                        ? mergeBack(item.remoteContent, item.localOriginal, item.excludeKeys)
-                        : item.remoteContent;
-                } else {
-                    content = item._pendingFinalContent
-                        ?? (item.excludeKeys.length > 0
-                            ? mergeBack(item.localContent, item.remoteOriginal, item.excludeKeys)
-                            : item.localContent);
-                }
+                content = (item.direction === 'upload' ? item._pendingFinalContent : undefined)
+                    ?? finalizeCandidate(candidateFor(item, item.direction), item.direction, item);
             } catch (e: any) {
                 failed.push({ item, error: e?.message ?? String(e) });
                 item._pendingFinalContent = undefined;
@@ -576,70 +516,6 @@ export class MultiSyncManager {
         } else {
             this.render();
         }
-    }
-
-    /**
-     * Compute added/removed line counts for a proposed overwrite using LCS.
-     * For `direction=download`, the local file is being replaced by remote
-     * content, so +added = lines in remote absent from local. For `upload`,
-     * the remote record is being replaced by local content, so the signs flip.
-     */
-    private static computeDiffStats(
-        localContent: string,
-        remoteContent: string,
-        direction: SyncDirection
-    ): { added: number; removed: number } {
-        const localLines = this.splitLines(localContent);
-        const remoteLines = this.splitLines(remoteContent);
-
-        // Skip LCS for very large files — fall back to crude counts.
-        const MAX_LCS_PRODUCT = 4_000_000;
-        let lcs: number;
-        if (localLines.length * remoteLines.length > MAX_LCS_PRODUCT) {
-            const localSet = new Set(localLines);
-            lcs = remoteLines.filter((line) => localSet.has(line)).length;
-            lcs = Math.min(lcs, localLines.length, remoteLines.length);
-        } else {
-            lcs = this.lcsLength(localLines, remoteLines);
-        }
-
-        const localOnly = localLines.length - lcs;
-        const remoteOnly = remoteLines.length - lcs;
-
-        if (direction === 'download') {
-            // Local is being overwritten with remote.
-            return { added: remoteOnly, removed: localOnly };
-        } else {
-            // Remote is being overwritten with local.
-            return { added: localOnly, removed: remoteOnly };
-        }
-    }
-
-    private static splitLines(content: string): string[] {
-        if (content === '') return [];
-        return content.split(/\r?\n/);
-    }
-
-    private static lcsLength(a: string[], b: string[]): number {
-        const m = a.length;
-        const n = b.length;
-        if (m === 0 || n === 0) return 0;
-        let prev = new Int32Array(n + 1);
-        let curr = new Int32Array(n + 1);
-        for (let i = 1; i <= m; i++) {
-            for (let j = 1; j <= n; j++) {
-                if (a[i - 1] === b[j - 1]) {
-                    curr[j] = prev[j - 1] + 1;
-                } else {
-                    curr[j] = prev[j] > curr[j - 1] ? prev[j] : curr[j - 1];
-                }
-            }
-            const tmp = prev;
-            prev = curr;
-            curr = tmp;
-            curr.fill(0);
-        }
-        return prev[n];
     }
 
     private static renderHtml(items: ItemView[], activeDiffProfile: string | null): string {

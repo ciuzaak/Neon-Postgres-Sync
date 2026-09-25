@@ -4,14 +4,13 @@ import * as path from 'path';
 import * as os from 'os';
 import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
-import { KeyPath, parsePaths, assertJsonc, stripKeys, mergeBack, JsoncFilterParseError, JsoncFilterMergeError } from './jsoncFilter';
+import { KeyPath, stripKeys, JsoncFilterMergeError } from './core/jsoncFilter';
+import { readLocalFile, resolveProfilePath } from './core/localFile';
+import { planSync, finalizeCandidate } from './core/plan';
+import type { SyncDirection } from './core/types';
 
-export type SyncDirection = 'download' | 'upload';
+export type { SyncDirection } from './core/types';
 export type SyncOutcome = 'confirmed' | 'cancelled';
-
-// Local mtime (OS clock) and remote update_time (DB server clock) can drift.
-// Treat any gap smaller than this as ambiguous and warn the user to verify direction.
-const AMBIGUOUS_TIMESTAMP_GAP_MS = 5_000;
 
 interface SyncSession {
     direction: SyncDirection;
@@ -85,62 +84,29 @@ export class SyncManager {
             { location: vscode.ProgressLocation.Notification, title: `Syncing ${profile.name}...` },
             async () => {
                 try {
-                    const { data: remoteData, updateTime: remoteUpdateTime } =
-                        await DatabaseService.fetchRecordWithMeta(profile);
+                    const remote = await DatabaseService.fetchRecordWithMeta(profile);
+                    const local = readLocalFile(this.resolvePath(profile.filePath));
+                    const plan = planSync(profile, local, remote);
 
-                    const absolutePath = this.resolvePath(profile.filePath);
-                    const localExists = fs.existsSync(absolutePath);
-                    let localContent = '';
-                    let localMtime: Date | null = null;
-                    if (localExists) {
-                        localContent = fs.readFileSync(absolutePath, 'utf-8');
-                        localMtime = fs.statSync(absolutePath).mtime;
-                    }
-
-                    const remoteExists = remoteData !== null;
-                    const remoteContent = remoteData ?? '';
-
-                    const excludeKeys = parsePaths(Array.isArray(profile.excludeKeys) ? profile.excludeKeys : []);
-
-                    let localForCompare = localContent;
-                    let remoteForCompare = remoteContent;
-                    if (excludeKeys.length > 0) {
-                        try {
-                            if (localExists) assertJsonc(localContent, 'local');
-                            if (remoteExists) assertJsonc(remoteContent, 'remote');
-                        } catch (e) {
-                            if (e instanceof JsoncFilterParseError) {
-                                vscode.window.showErrorMessage(
-                                    `Profile "${profile.name}" has excludeKeys but ${e.side} is not valid JSONC: ${e.message}`
-                                );
-                                return;
-                            }
-                            throw e;
+                    switch (plan.status) {
+                        case 'parse-error':
+                            vscode.window.showErrorMessage(
+                                `Profile "${profile.name}" has excludeKeys but ${plan.parseError!.side} is not valid JSONC: ${plan.parseError!.message}`
+                            );
+                            return;
+                        case 'missing-both':
+                            vscode.window.showWarningMessage(
+                                `Neither local file nor remote record exists for "${profile.name}".`
+                            );
+                            return;
+                        case 'identical': {
+                            const suffix = plan.excludeKeys.length > 0 ? ' after exclude' : '';
+                            vscode.window.showInformationMessage(`Content is identical${suffix}. No sync needed.`);
+                            return;
                         }
-                        if (localExists) localForCompare = stripKeys(localContent, excludeKeys);
-                        if (remoteExists) remoteForCompare = stripKeys(remoteContent, excludeKeys);
                     }
 
-                    if (!localExists && !remoteExists) {
-                        vscode.window.showWarningMessage(
-                            `Neither local file nor remote record exists for "${profile.name}".`
-                        );
-                        return;
-                    }
-
-                    if (localExists && remoteExists && localForCompare === remoteForCompare) {
-                        const suffix = excludeKeys.length > 0 ? ' after exclude' : '';
-                        vscode.window.showInformationMessage(`Content is identical${suffix}. No sync needed.`);
-                        return;
-                    }
-
-                    const suggestion = this.decideSyncDirection(
-                        localExists,
-                        remoteExists,
-                        localMtime,
-                        remoteUpdateTime
-                    );
-
+                    const suggestion = plan.suggestion;
                     let direction: SyncDirection;
                     if (suggestion.ambiguous) {
                         const picked = await this.promptAmbiguousDirection(profile, suggestion.reason, suggestion.direction);
@@ -154,7 +120,9 @@ export class SyncManager {
                         );
                     }
 
-                    await this.openDiff(profile, direction, localContent, remoteContent, { excludeKeys });
+                    await this.openDiff(profile, direction, plan.localOriginal, plan.remoteOriginal, {
+                        excludeKeys: plan.excludeKeys
+                    });
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Error starting sync: ${error.message}`);
                 }
@@ -172,7 +140,7 @@ export class SyncManager {
      * When `excludeKeys` is non-empty, the diff editor shows the STRIPPED content
      * (via openDiff's strip step) and the resolver receives the user-edited
      * stripped candidate. The caller is then responsible for calling
-     * jsoncFilter.mergeBack against its own raw originals before persisting —
+     * core/plan.finalizeCandidate against its own raw originals before persisting —
      * SyncManager.applyMergeBack deliberately short-circuits for external resolvers
      * because the caller's persistence boundary is wider (e.g. multi-sync's batch
      * upload + per-row local write).
@@ -269,50 +237,6 @@ export class SyncManager {
         );
         if (!choice) return undefined;
         return choice === downloadLabel ? 'download' : 'upload';
-    }
-
-    static decideSyncDirection(
-        localExists: boolean,
-        remoteExists: boolean,
-        localMtime: Date | null,
-        remoteUpdateTime: Date | null
-    ): { direction: SyncDirection; reason: string; ambiguous: boolean } {
-        if (!localExists) {
-            return { direction: 'download', reason: 'no local file yet', ambiguous: false };
-        }
-        if (!remoteExists) {
-            return { direction: 'upload', reason: 'no remote record yet', ambiguous: false };
-        }
-        if (!remoteUpdateTime && localMtime) {
-            return { direction: 'upload', reason: 'remote has no update_time', ambiguous: true };
-        }
-        if (!localMtime && remoteUpdateTime) {
-            return { direction: 'download', reason: 'local has no mtime', ambiguous: true };
-        }
-        if (!localMtime && !remoteUpdateTime) {
-            return {
-                direction: 'upload',
-                reason: 'neither side has a timestamp; defaulting to upload',
-                ambiguous: true
-            };
-        }
-
-        const localTime = localMtime!.getTime();
-        const remoteTime = remoteUpdateTime!.getTime();
-        const ambiguous = Math.abs(remoteTime - localTime) < AMBIGUOUS_TIMESTAMP_GAP_MS;
-
-        if (remoteTime > localTime) {
-            return {
-                direction: 'download',
-                reason: `remote is newer (${remoteUpdateTime!.toISOString()} > local ${localMtime!.toISOString()})`,
-                ambiguous
-            };
-        }
-        return {
-            direction: 'upload',
-            reason: `local is newer (${localMtime!.toISOString()} ≥ remote ${remoteUpdateTime!.toISOString()})`,
-            ambiguous
-        };
     }
 
     private static async openDiff(
@@ -493,13 +417,7 @@ export class SyncManager {
     }
 
     static resolvePath(filePath: string): string {
-        if (path.isAbsolute(filePath)) {
-            return filePath;
-        }
-        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            return path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, filePath);
-        }
-        return filePath;
+        return resolveProfilePath(filePath, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
     }
 
     /**
@@ -537,15 +455,15 @@ export class SyncManager {
 
     private static applyMergeBack(session: SyncSession, candidateContent: string): string {
         // External resolvers (e.g. MultiSyncManager) receive the raw candidate and
-        // are responsible for calling jsoncFilter.mergeBack themselves against their
+        // are responsible for calling core/plan.finalizeCandidate themselves against their
         // own cached originals. This split exists because multi-sync persists across
         // a different transaction boundary and needs the merged bytes for both the
         // remote upload AND the local write in a single coordinated step.
         if (session.externalResolver) return candidateContent;
-        if (session.excludeKeys.length === 0) return candidateContent;
-        const destinationOriginal = session.direction === 'download'
-            ? session.originalLocal
-            : session.originalRemote;
-        return mergeBack(candidateContent, destinationOriginal, session.excludeKeys);
+        return finalizeCandidate(candidateContent, session.direction, {
+            localOriginal: session.originalLocal,
+            remoteOriginal: session.originalRemote,
+            excludeKeys: session.excludeKeys
+        });
     }
 }
