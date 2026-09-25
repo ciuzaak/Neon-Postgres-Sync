@@ -192,3 +192,27 @@ test('saveProfiles drops empty/missing excludeKeys when writing the config file'
     assert.equal(Object.prototype.hasOwnProperty.call(written.profiles[1], 'excludeKeys'), false);
     assert.deepEqual(written.profiles[2].excludeKeys, ['x.y']);
 });
+
+test('an unreadable config file surfaces a toast and yields no profiles instead of throwing', () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    fs.mkdirSync(path.join(storagePath, 'neon-sync.json'));
+    const { ConfigManager, vscode } = initConfig(storagePath);
+
+    assert.deepEqual(ConfigManager.getProfiles(), []);
+    assert.equal(vscode.window.errorMessages.length, 1);
+    assert.match(vscode.window.errorMessages[0], /^Failed to parse neon-sync\.json: .*EISDIR/);
+});
+
+test('a corrupt config file surfaces a toast and is overwritten by saveProfiles', async () => {
+    const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-config-'));
+    const configPath = path.join(storagePath, 'neon-sync.json');
+    fs.writeFileSync(configPath, '{ not json');
+    const { ConfigManager, vscode } = initConfig(storagePath);
+    const profiles: Profile[] = [{ name: 'a', filePath: 'a.json', id: '1', tableName: 'records' }];
+
+    assert.deepEqual(ConfigManager.getProfiles(), []);
+    await ConfigManager.saveProfiles(profiles);
+
+    assert.match(vscode.window.errorMessages[0], /^Failed to parse neon-sync\.json: /);
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf-8')), { profiles });
+});

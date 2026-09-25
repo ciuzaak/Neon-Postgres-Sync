@@ -155,3 +155,15 @@ test('updateRecords builds one query per item and sends them through a transacti
     assert.equal(sql.transactionCalls.length, 1);
     assert.equal(sql.transactionCalls[0].length, 2);
 });
+
+test('after the connection string changes, the next call connects with the new string', async () => {
+    const { DatabaseService, neon } = await configureConnection('postgres://first');
+    const { ConfigManager } = require('../src/config') as typeof import('../src/config');
+
+    await DatabaseService.fetchRecordWithMeta(profile());
+    await DatabaseService.fetchRecordWithMeta(profile());
+    await ConfigManager.setConnectionString('postgres://second');
+    await DatabaseService.fetchRecordWithMeta(profile());
+
+    assert.deepEqual(neon.calls, ['postgres://first', 'postgres://second']);
+});

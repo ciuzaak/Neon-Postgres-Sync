@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { CONFIG_FILENAME, ConfigFileParseError, ConfigFileStore } from './core/configFile';
+import { CONFIG_FILENAME, ConfigFileReadError, ConfigFileStore } from './core/configFile';
 import type { ConfigFile, Profile } from './core/types';
 
 export type { ConfigFile, Profile } from './core/types';
@@ -33,7 +33,7 @@ export class ConfigManager {
         try {
             return this.getStore()?.read();
         } catch (e) {
-            if (e instanceof ConfigFileParseError) {
+            if (e instanceof ConfigFileReadError) {
                 vscode.window.showErrorMessage(e.message);
                 return undefined;
             }
@@ -127,7 +127,7 @@ export class ConfigManager {
         try {
             this.getStore()?.removeConnectionString();
         } catch (e) {
-            if (!(e instanceof ConfigFileParseError)) throw e;
+            if (!(e instanceof ConfigFileReadError)) throw e;
             vscode.window.showErrorMessage(e.message);
         }
     }

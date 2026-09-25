@@ -3,7 +3,7 @@ import assert = require('node:assert/strict');
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ConfigFileParseError, ConfigFileStore } from '../../src/core/configFile';
+import { ConfigFileReadError, ConfigFileStore } from '../../src/core/configFile';
 import type { ConfigFile } from '../../src/core/types';
 
 function tempConfigPath(): string {
@@ -14,15 +14,22 @@ test('read returns undefined when the file does not exist', () => {
     assert.equal(new ConfigFileStore(tempConfigPath()).read(), undefined);
 });
 
-test('read throws ConfigFileParseError on malformed JSON', () => {
+test('read throws ConfigFileReadError on malformed JSON', () => {
     const filePath = tempConfigPath();
     fs.writeFileSync(filePath, '{ nope');
 
     assert.throws(() => new ConfigFileStore(filePath).read(), (e: unknown) => {
-        assert.ok(e instanceof ConfigFileParseError);
+        assert.ok(e instanceof ConfigFileReadError);
         assert.match(e.message, /^Failed to parse neon-sync\.json: /);
         return true;
     });
+});
+
+test('read wraps IO failures (e.g. the path is a directory) in ConfigFileReadError', () => {
+    const filePath = tempConfigPath();
+    fs.mkdirSync(filePath);
+
+    assert.throws(() => new ConfigFileStore(filePath).read(), ConfigFileReadError);
 });
 
 test('saveProfiles normalizes profiles and preserves other top-level fields', () => {

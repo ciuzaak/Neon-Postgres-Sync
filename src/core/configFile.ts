@@ -4,10 +4,11 @@ import type { ConfigFile, Profile } from './types';
 
 export const CONFIG_FILENAME = 'neon-sync.json';
 
-export class ConfigFileParseError extends Error {
+/** The config file exists but could not be read or parsed. */
+export class ConfigFileReadError extends Error {
     constructor(public readonly filePath: string, public readonly cause: unknown) {
         super(`Failed to parse ${path.basename(filePath)}: ${cause}`);
-        this.name = 'ConfigFileParseError';
+        this.name = 'ConfigFileReadError';
     }
 }
 
@@ -24,16 +25,18 @@ export class ConfigFileStore {
         return fs.existsSync(this.filePath);
     }
 
-    /** Returns undefined when the file does not exist; throws ConfigFileParseError on bad JSON. */
+    /**
+     * Returns undefined when the file does not exist; throws ConfigFileReadError
+     * when it exists but can't be read (permissions, EISDIR…) or isn't JSON.
+     */
     read(): ConfigFile | undefined {
         if (!this.exists()) {
             return undefined;
         }
-        const content = fs.readFileSync(this.filePath, 'utf-8');
         try {
-            return JSON.parse(content);
+            return JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
         } catch (e) {
-            throw new ConfigFileParseError(this.filePath, e);
+            throw new ConfigFileReadError(this.filePath, e);
         }
     }
 
