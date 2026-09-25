@@ -5,6 +5,7 @@ All notable changes to the "neon-postgres-sync" extension will be documented in 
 ## [Unreleased]
 ### Fixed
 - **Key Filtering Lost Neighbouring Comments**: With `excludeKeys` active, removing a filtered key also deleted the comment trailing the previous key (e.g. `"fontSize": 14, // why 14`) and any comment lines just above the filtered key. The comment vanished from the diff and, once confirmed, from the written file on both sides. Only the filtered key and its own same-line comment are removed now.
+- **Key Filtering Moved Comments When Restoring Keys**: Splicing a filtered key back in placed the separating comma after the previous key's trailing comment, moving that comment onto the restored key's line (where the next sync would strip it). Restored keys are now appended on their own line, and the target's value is copied verbatim, so formatting and comments inside it (and number spellings like `1.0`) are preserved.
 
 ## [0.7.0] - 2026-05-19
 ### Added

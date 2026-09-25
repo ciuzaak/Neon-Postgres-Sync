@@ -70,10 +70,6 @@ function parseErrorCodeName(code: jsoncParser.ParseErrorCode): string {
     return names[code] ?? `ParseErrorCode(${code})`;
 }
 
-const MODIFY_OPTIONS: jsoncParser.ModificationOptions = {
-    formattingOptions: { tabSize: 4, insertSpaces: true }
-};
-
 /** First non-trivia token at or after `offset` (whitespace, line breaks and comments skipped). */
 function nextSignificantToken(text: string, offset: number): { kind: jsoncParser.SyntaxKind; offset: number } {
     const scanner = jsoncParser.createScanner(text.slice(offset), false);
@@ -161,6 +157,94 @@ function removeProperty(text: string, path: KeyPath): string {
     return jsoncParser.applyEdits(text, propertyRemovalEdits(text, property));
 }
 
+/** Indent unit of the document: the first indented line's leading whitespace, else 4 spaces. */
+function detectIndentUnit(text: string): string {
+    const m = /\n([ \t]+)\S/.exec(text);
+    if (!m) return '    ';
+    return m[1].startsWith('\t') ? '\t' : m[1];
+}
+
+function lineIndentIfOwnLine(text: string, offset: number): string | null {
+    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    const prefix = text.slice(lineStart, offset);
+    return /^[ \t]*$/.test(prefix) ? prefix : null;
+}
+
+/**
+ * Edits that append `"key": rawValue` as the last property of `obj`,
+ * keeping every existing comment attached to its line. jsonc-parser's
+ * insertion puts the separating comma after the last value's trailing
+ * comment position, which moves `"a": 1 // note` onto the new key's line —
+ * and a later strip of that key then deletes the note.
+ */
+function propertyInsertEdits(text: string, obj: jsoncParser.Node, key: string, rawValue: string): jsoncParser.Edit[] {
+    const eol = text.includes('\r\n') ? '\r\n' : '\n';
+    const member = `${JSON.stringify(key)}: ${rawValue}`;
+    const children = obj.children ?? [];
+
+    if (children.length === 0) {
+        const open = obj.offset + 1;
+        const body = text.slice(open, obj.offset + obj.length - 1);
+        if (!body.includes('\n')) {
+            return [{ offset: open, length: 0, content: member }];
+        }
+        const objIndent = lineIndentIfOwnLine(text, obj.offset) ?? (text.slice(text.lastIndexOf('\n', obj.offset - 1) + 1).match(/^[ \t]*/)![0]);
+        return [{ offset: open, length: 0, content: `${eol}${objIndent}${detectIndentUnit(text)}${member}` }];
+    }
+
+    const last = children[children.length - 1];
+    const lastEnd = last.offset + last.length;
+    const next = nextSignificantToken(text, lastEnd);
+    const hasTrailingComma = next.kind === jsoncParser.SyntaxKind.CommaToken;
+    const anchor = hasTrailingComma ? next.offset + 1 : lastEnd;
+    const commaEdit: jsoncParser.Edit[] = hasTrailingComma ? [] : [{ offset: lastEnd, length: 0, content: ',' }];
+
+    const indent = lineIndentIfOwnLine(text, last.offset);
+    const newline = text.indexOf('\n', anchor);
+    if (indent !== null && newline !== -1) {
+        const lineContentEnd = text[newline - 1] === '\r' ? newline - 1 : newline;
+        if (/^[ \t]*(\/\/[^\n]*)?$/.test(text.slice(anchor, lineContentEnd))) {
+            return [...commaEdit, { offset: lineContentEnd, length: 0, content: `${eol}${indent}${member}` }];
+        }
+    }
+    return [...commaEdit, { offset: anchor, length: 0, content: ` ${member}` }];
+}
+
+/**
+ * Set the value at `path` to `rawValue` (JSON text). Replaces an existing
+ * value in place; otherwise appends the missing part of the path to the
+ * deepest existing object, creating intermediate objects inline. Throws
+ * JsoncFilterMergeError when a non-object blocks the path.
+ */
+function setRawValue(text: string, path: KeyPath, rawValue: string): string {
+    const tree = jsoncParser.parseTree(text, [], PARSE_OPTIONS);
+    if (!tree || tree.type !== 'object') {
+        throw new JsoncFilterMergeError(path, new Error('candidate root is not an object'));
+    }
+
+    const existing = jsoncParser.findNodeAtLocation(tree, [...path]);
+    if (existing) {
+        return jsoncParser.applyEdits(text, [{ offset: existing.offset, length: existing.length, content: rawValue }]);
+    }
+
+    let obj = tree;
+    let depth = 0;
+    for (; depth < path.length - 1; depth++) {
+        const child = jsoncParser.findNodeAtLocation(obj, [path[depth]]);
+        if (!child) break;
+        if (child.type !== 'object') {
+            throw new JsoncFilterMergeError(path, new Error(`"${path.slice(0, depth + 1).join('.')}" is not an object`));
+        }
+        obj = child;
+    }
+
+    let value = rawValue;
+    for (let i = path.length - 1; i > depth; i--) {
+        value = `{ ${JSON.stringify(path[i])}: ${value} }`;
+    }
+    return jsoncParser.applyEdits(text, propertyInsertEdits(text, obj, path[depth], value));
+}
+
 /**
  * Returns `text` with every key at the given paths removed. Comments and
  * formatting on remaining keys are preserved. No-op when a path does not exist
@@ -202,23 +286,16 @@ export function mergeBack(
     let current = candidateText;
     for (const path of ordered) {
         const destNode = destTree ? jsoncParser.findNodeAtLocation(destTree, [...path]) : undefined;
-        const replacement = destNode ? jsoncParser.getNodeValue(destNode) : undefined;
-        if (replacement === undefined) {
+        if (!destNode) {
             // Destination has no value: delete from candidate without eating
             // neighbouring comments. No-op if candidate can't reach the path.
             current = removeProperty(current, path);
             continue;
         }
-        let edits: jsoncParser.Edit[];
-        try {
-            edits = jsoncParser.modify(current, [...path], replacement, MODIFY_OPTIONS);
-        } catch (e) {
-            // Destination has a value but candidate's structure blocks restoring it.
-            // Silent swallow would lose the destination value — surface to caller.
-            throw new JsoncFilterMergeError(path, e);
-        }
-        if (edits.length === 0) continue;
-        current = jsoncParser.applyEdits(current, edits);
+        // Splice the destination's raw text, so formatting and comments inside
+        // the value survive (re-serializing would drop them).
+        const rawValue = destinationOriginal.slice(destNode.offset, destNode.offset + destNode.length);
+        current = setRawValue(current, path, rawValue);
     }
     return current;
 }

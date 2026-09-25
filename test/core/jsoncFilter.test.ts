@@ -191,6 +191,43 @@ test('upload round trip keeps a comment next to an excluded key', () => {
     assert.deepEqual(JSON.parse(final.replace(/\/\/.*$/gm, '')), { fontSize: 14, theme: 'light' });
 });
 
+test('mergeBack appends a restored key after a trailing comment, not before it', () => {
+    const out = mergeBack('{\n    "fontSize": 14 // why 14\n}\n', '{"theme": "light"}', [['theme']]);
+    assert.equal(out, '{\n    "fontSize": 14, // why 14\n    "theme": "light"\n}\n');
+});
+
+test('mergeBack insertion respects trailing commas, inline objects, empty objects, CRLF and tabs', () => {
+    assert.equal(mergeBack('{\n    "a": 1, // c\n}', '{"t": 1}', [['t']]), '{\n    "a": 1, // c\n    "t": 1\n}');
+    assert.equal(mergeBack('{"a": 1}', '{"t": "x"}', [['t']]), '{"a": 1, "t": "x"}');
+    assert.equal(mergeBack('{}', '{"t": "x"}', [['t']]), '{"t": "x"}');
+    assert.equal(mergeBack('{\n}', '{"t": "x"}', [['t']]), '{\n    "t": "x"\n}');
+    assert.equal(mergeBack('{\r\n    "a": 1 // c\r\n}\r\n', '{"t": 1}', [['t']]), '{\r\n    "a": 1, // c\r\n    "t": 1\r\n}\r\n');
+    assert.equal(mergeBack('{\n\t"a": 1\n}', '{"t": 1}', [['t']]), '{\n\t"a": 1,\n\t"t": 1\n}');
+});
+
+test('mergeBack inserts into an existing nested object at its indentation', () => {
+    const out = mergeBack('{\n    "o": {\n        "k": 1 // kc\n    }\n}', '{"o": {"t": 2}}', [['o', 't']]);
+    assert.equal(out, '{\n    "o": {\n        "k": 1, // kc\n        "t": 2\n    }\n}');
+});
+
+test('mergeBack splices the destination value verbatim, keeping its formatting and comments', () => {
+    const dest = '{\n    "obj": {\n        // inner\n        "k": 1.0\n    }\n}';
+    const out = mergeBack('{\n    "a": 1\n}', dest, [['obj']]);
+    assert.equal(out, '{\n    "a": 1,\n    "obj": {\n        // inner\n        "k": 1.0\n    }\n}');
+    // Replacing an existing value keeps the candidate's comments around it.
+    assert.equal(
+        mergeBack('{\n    "theme": "dark", // mine\n    "a": 1\n}', '{"theme": "light"}', [['theme']]),
+        '{\n    "theme": "light", // mine\n    "a": 1\n}'
+    );
+});
+
+test('strip → merge round trip reproduces the original projection exactly', () => {
+    const K = [['theme']];
+    const local = '{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n';
+    const after = mergeBack(stripKeys(local, K), '{\n    "fontSize": 16,\n    "theme": "light"\n}\n', K);
+    assert.equal(stripKeys(after, K), stripKeys(local, K));
+});
+
 test('mergeBack with neither side holding the filtered key is a no-op', () => {
     const candidate = '{"a": 1}';
     const destination = '{"a": 0}';
