@@ -282,7 +282,7 @@ test('conditionalWriteMany sends the CAS statement shapes and parameter lists', 
     assert.deepEqual(versions, ['v1', 'v2']);
     assert.equal(sql.transactionCalls.length, 1);
     const [upd, ins] = sql.queryCalls;
-    assert.match(upd.query, /UPDATE records\s+SET data = \$2, update_time = CURRENT_TIMESTAMP\s+WHERE id = \$1 AND encode\(sha256\(convert_to\(data::text, 'UTF8'\)\), 'hex'\) IS NOT DISTINCT FROM \$3/);
+    assert.match(upd.query, /UPDATE records\s+SET data = \$2, update_time = CURRENT_TIMESTAMP\s+WHERE id = \$1 AND encode\(sha256\(convert_to\(data::text, current_setting\('server_encoding'\)\)\), 'hex'\) IS NOT DISTINCT FROM \$3/);
     assert.deepEqual(upd.params, ['a', 'A', 'h']);
     assert.match(ins.query, /INSERT INTO public\.records .*ON CONFLICT \(id\) DO NOTHING/s);
     assert.deepEqual(ins.params, ['b', 'B']);

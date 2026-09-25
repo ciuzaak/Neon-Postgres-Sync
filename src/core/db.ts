@@ -18,8 +18,10 @@ const VERSION_ALIAS = 'version';
 // harmless here — if the remote holds exactly what the user reviewed,
 // overwriting it loses nothing. `::text` also covers json/jsonb data columns.
 // sha256 rather than md5: md5() errors on FIPS-mode servers, and this
-// expression is on every fetch. NULL data yields a NULL token.
-const VERSION_EXPR = `encode(sha256(convert_to(${DATA_COLUMN}::text, 'UTF8')), 'hex')`;
+// expression is on every fetch. Bytes are taken in the server's own encoding
+// (a no-op conversion that can't fail), not forced to UTF8, which would error
+// on non-UTF8 bytes in e.g. a SQL_ASCII database. NULL data yields a NULL token.
+const VERSION_EXPR = `encode(sha256(convert_to(${DATA_COLUMN}::text, current_setting('server_encoding'))), 'hex')`;
 const STALE_SQLSTATE = '22012'; // division_by_zero — raised by the CAS sentinel below
 
 /** What the caller last saw on the remote side; a conditional write succeeds only if it still holds. */
