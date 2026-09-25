@@ -10,6 +10,9 @@ All notable changes to the "neon-postgres-sync" extension will be documented in 
 - **Local File Guard**: A local file edited after the diff or batch page loaded is not overwritten — checked again right before writing. Local writes are atomic (a failure midway can no longer leave a truncated file), follow symlinks instead of replacing them, and keep the file's permissions.
 - **Shared-File Check**: Profiles that point at the same local file are refused at sync time; they would corrupt each other's sync history.
 
+### Changed
+- **One Sync at a Time**: `Sync File` and `Sync Multiple Profiles…` are refused while a sync diff is still open (finish or cancel it first). Previously a second sync silently replaced the open diff and left its temp files behind.
+
 ### Fixed
 - **Upload Overwrote This Machine's Filtered Keys**: With `excludeKeys`, uploading also wrote the *remote's* values for the filtered keys into the local file, so e.g. a machine-specific theme was replaced on every upload. Each side now keeps its own values.
 - **`json` Data Columns Rewritten on Fetch**: When the table's `data` column was `json`/`jsonb` rather than the documented `TEXT`, fetched content was parsed and re-serialized (`1.0` became `1`, formatting and key order changed), so a round trip altered the file. Content is now read as the column's text: verbatim for `json`, Postgres's canonical form for `jsonb` (use `TEXT` to preserve comments and formatting).
