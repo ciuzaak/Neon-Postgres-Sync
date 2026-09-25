@@ -21,7 +21,9 @@ function local(content: string | null, mtime: Date | null = new Date('2026-01-01
 }
 
 function remote(data: string | null, updateTime: Date | null = new Date('2026-01-01T00:01:00Z')): FetchedRecord {
-    return { data, updateTime: data === null ? null : updateTime };
+    return data === null
+        ? { data: null, updateTime: null, version: null }
+        : { data, updateTime, version: `opaque-token:${data}` };
 }
 
 // ── decideSyncDirection ────────────────────────────────────────────────

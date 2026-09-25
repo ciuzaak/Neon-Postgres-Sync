@@ -16,4 +16,10 @@ export type SyncDirection = 'download' | 'upload';
 export interface FetchedRecord {
     data: string | null;
     updateTime: Date | null;
+    /**
+     * Opaque optimistic-concurrency token: a server-computed sha256 of the
+     * row's content. Null when the row is absent or its data is NULL.
+     * Only ever compared or sent back, never interpreted client-side.
+     */
+    version: string | null;
 }

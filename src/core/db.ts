@@ -9,6 +9,46 @@ const ID_COLUMN = 'id';
 const DATA_COLUMN = 'data';
 const CREATE_TIME_COLUMN = 'create_time';
 const UPDATE_TIME_COLUMN = 'update_time';
+const VERSION_ALIAS = 'version';
+// Content-derived version token, computed server-side. Deliberately NOT based
+// on update_time: its ::text form depends on the column's precision (two
+// writes in one second collide under timestamp(0)) and, for timestamptz, on
+// the session TimeZone; and writers that skip update_time (the Neon console)
+// would go unnoticed. A content hash has none of these problems, and ABA is
+// harmless here — if the remote holds exactly what the user reviewed,
+// overwriting it loses nothing. `::text` also covers json/jsonb data columns.
+// sha256 rather than md5: md5() errors on FIPS-mode servers, and this
+// expression is on every fetch. NULL data yields a NULL token.
+const VERSION_EXPR = `encode(sha256(convert_to(${DATA_COLUMN}::text, 'UTF8')), 'hex')`;
+const STALE_SQLSTATE = '22012'; // division_by_zero — raised by the CAS sentinel below
+
+/** What the caller last saw on the remote side; a conditional write succeeds only if it still holds. */
+export interface RemoteExpectation {
+    exists: boolean;
+    /** `FetchedRecord.version` as fetched. Ignored when `exists` is false. */
+    version: string | null;
+}
+
+export function expectationOf(record: FetchedRecord): RemoteExpectation {
+    return { exists: record.data !== null, version: record.version };
+}
+
+/**
+ * A conditional write found the remote row changed since it was fetched.
+ * Nothing in the batch was committed. `profiles` lists the rows confirmed
+ * stale by a follow-up read; it is empty only when that read itself failed
+ * (staleness is then likely but unconfirmed).
+ */
+export class StaleRemoteError extends Error {
+    constructor(public readonly profiles: Profile[]) {
+        super(
+            profiles.length > 0
+                ? `Remote changed since it was fetched: ${profiles.map((p) => p.name).join(', ')}.`
+                : 'Remote changed since it was fetched.'
+        );
+        this.name = 'StaleRemoteError';
+    }
+}
 
 /**
  * Throws unless `tableName` is a plain SQL identifier (optionally
@@ -47,7 +87,7 @@ function parseQueryRows(result: unknown): QueryRow[] {
 
 function parseFetchedRow(row: QueryRow | undefined): FetchedRecord {
     if (!row) {
-        return { data: null, updateTime: null };
+        return { data: null, updateTime: null, version: null };
     }
     const rawData = row[DATA_COLUMN];
     const data = typeof rawData === 'string' ? rawData : JSON.stringify(rawData, null, 2);
@@ -63,11 +103,14 @@ function parseFetchedRow(row: QueryRow | undefined): FetchedRecord {
         }
     }
 
-    return { data, updateTime };
+    const rawVersion = row[VERSION_ALIAS];
+    const version = typeof rawVersion === 'string' ? rawVersion : null;
+
+    return { data, updateTime, version };
 }
 
 function selectQuery(tableName: string): string {
-    return `SELECT ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
+    return `SELECT ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
 }
 
 function upsertQuery(tableName: string): string {
@@ -77,6 +120,74 @@ function upsertQuery(tableName: string): string {
         ON CONFLICT (${ID_COLUMN})
         DO UPDATE SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
     `;
+}
+
+/**
+ * Compare-and-swap write. The data-modifying CTE affects 0 or 1 rows; the
+ * outer aggregate always yields exactly one row, so `1 / count(*)` raises
+ * division_by_zero when the expectation no longer holds. That error is what
+ * makes a non-interactive (HTTP) transaction roll back the whole batch — a
+ * zero-row UPDATE alone would commit silently.
+ *
+ * - Row expected to exist: update only if its content hash still matches
+ *   (`IS NOT DISTINCT FROM` so rows whose data is NULL work).
+ * - Row expected absent: insert only if nobody created it meanwhile.
+ *
+ * Params: $1 id, $2 data, $3 expected version (update form only).
+ */
+function conditionalWriteQuery(tableName: string, expectExists: boolean): string {
+    const write = expectExists
+        ? `UPDATE ${tableName}
+               SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
+               WHERE ${ID_COLUMN} = $1 AND ${VERSION_EXPR} IS NOT DISTINCT FROM $3
+               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}`
+        : `INSERT INTO ${tableName} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
+               VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+               ON CONFLICT (${ID_COLUMN}) DO NOTHING
+               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}`;
+    return `
+        WITH w AS (${write})
+        SELECT max(${VERSION_ALIAS}) AS ${VERSION_ALIAS}, 1 / count(*)::int AS cas_ok FROM w
+    `;
+}
+
+function conditionalWriteParams(profile: Profile, data: string, expected: RemoteExpectation): unknown[] {
+    return expected.exists ? [profile.id, data, expected.version] : [profile.id, data];
+}
+
+function parseWrittenVersion(result: unknown): string {
+    const version = parseQueryRows(result)[0]?.[VERSION_ALIAS];
+    if (typeof version !== 'string') {
+        throw new Error('Unexpected conditional write response from HTTP transport.');
+    }
+    return version;
+}
+
+/**
+ * Two items addressing the same row can't both be conditional on the same
+ * version: the first write changes it, so the second would always look stale.
+ * Keyed on the unqualified, lowercased table name: `records` and
+ * `public.records` usually name the same table (and unquoted identifiers are
+ * case-insensitive). Same-named tables in two schemas are rejected too — a
+ * false positive whose only cost is "sync them separately".
+ */
+function assertNoDuplicateRows(items: Array<{ profile: Profile }>): void {
+    const seen = new Map<string, Profile>();
+    for (const { profile } of items) {
+        const table = profile.tableName.toLowerCase().split('.').pop()!;
+        const key = `${table}\u0000${profile.id}`;
+        const first = seen.get(key);
+        if (first) {
+            throw new Error(
+                `Profiles "${first.name}" and "${profile.name}" both target record "${profile.id}" in ${profile.tableName}; sync them separately.`
+            );
+        }
+        seen.set(key, profile);
+    }
+}
+
+function isStaleSentinel(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === STALE_SQLSTATE;
 }
 
 /**
@@ -102,6 +213,7 @@ export class RecordStore {
         return parseFetchedRow(parseQueryRows(result)[0]);
     }
 
+    /** Unconditional write. Legacy: superseded by `conditionalWrite`; kept until the extension migrates. */
     async upsert(profile: Profile, data: string): Promise<void> {
         assertValidTableName(profile.tableName);
         await this.sql.query(upsertQuery(profile.tableName), [profile.id, data]);
@@ -128,9 +240,81 @@ export class RecordStore {
     }
 
     /**
+     * Write `data` only if the remote row still matches `expected`. Returns
+     * the row's new version. Throws StaleRemoteError (nothing written) otherwise.
+     */
+    async conditionalWrite(profile: Profile, data: string, expected: RemoteExpectation): Promise<string> {
+        const [version] = await this.conditionalWriteMany([{ profile, data, expected }]);
+        return version;
+    }
+
+    /**
+     * Conditional writes for many profiles in one atomic HTTP transaction:
+     * if any row is stale, none are committed and StaleRemoteError names the
+     * stale rows. Returns new versions aligned with the input order.
+     */
+    async conditionalWriteMany(
+        items: Array<{ profile: Profile; data: string; expected: RemoteExpectation }>
+    ): Promise<string[]> {
+        if (items.length === 0) {
+            return [];
+        }
+        for (const { profile } of items) {
+            assertValidTableName(profile.tableName);
+        }
+        assertNoDuplicateRows(items);
+
+        const sql = this.sql;
+        const attempt = () => sql.transaction(
+            items.map(({ profile, data, expected }) =>
+                sql.query(
+                    conditionalWriteQuery(profile.tableName, expected.exists),
+                    conditionalWriteParams(profile, data, expected)
+                )
+            )
+        );
+
+        // At most two attempts. After a sentinel hit, a re-read that finds
+        // nothing stale means either a race already undone (another writer
+        // changed the row and restored it — or created and deleted it — within
+        // one round trip) or a division_by_zero from elsewhere (a user trigger
+        // or CHECK). One retry tells them apart: the race resolves, the other
+        // cause fails again and is rethrown as-is, not relabeled stale.
+        for (let tries = 1; ; tries++) {
+            try {
+                return (await attempt()).map(parseWrittenVersion);
+            } catch (error) {
+                if (!isStaleSentinel(error)) throw error;
+                const stale = await this.findStale(items);
+                if (stale === undefined) throw new StaleRemoteError([]);
+                if (stale.length > 0) throw new StaleRemoteError(stale);
+                if (tries >= 2) throw error;
+            }
+        }
+    }
+
+    /** Which items no longer match their expectation; undefined if the re-read fails. */
+    private async findStale(
+        items: Array<{ profile: Profile; expected: RemoteExpectation }>
+    ): Promise<Profile[] | undefined> {
+        let current: FetchedRecord[];
+        try {
+            current = await this.fetchMany(items.map((i) => i.profile));
+        } catch {
+            return undefined;
+        }
+        return items
+            .filter(({ expected }, idx) => {
+                const now = expectationOf(current[idx]);
+                return now.exists !== expected.exists || (expected.exists && now.version !== expected.version);
+            })
+            .map((i) => i.profile);
+    }
+
+    /**
      * Update records for many profiles in a single HTTP round-trip via
      * a non-interactive transaction. Either all writes succeed or none
-     * are committed.
+     * are committed. Legacy: superseded by `conditionalWriteMany`.
      */
     async upsertMany(items: Array<{ profile: Profile; data: string }>): Promise<void> {
         if (items.length === 0) {
