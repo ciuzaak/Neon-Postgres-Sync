@@ -94,6 +94,33 @@ test('a write that fails midway (file size limit) leaves the original intact and
     assert.deepEqual(fs.readdirSync(dir), ['big.json']);
 });
 
+test('writeFileAtomic resolves a relative `..` link from the real directory, like the OS', { skip: !posix }, () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'real', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'real', 'settings.json'), 'v1');
+    fs.symlinkSync(path.join(dir, 'real', 'sub'), path.join(dir, 'alias'));
+    fs.symlinkSync(path.join('..', 'settings.json'), path.join(dir, 'real', 'sub', 'link.json'));
+    const viaAlias = path.join(dir, 'alias', 'link.json');
+    assert.equal(fs.readFileSync(viaAlias, 'utf-8'), 'v1', 'the OS reads real/settings.json');
+
+    writeFileAtomic(viaAlias, 'v2');
+
+    assert.equal(fs.readFileSync(viaAlias, 'utf-8'), 'v2', 'the write lands on the file that is read');
+    assert.equal(fs.existsSync(path.join(dir, 'settings.json')), false, 'no stray file next to the alias');
+});
+
+test('writeFileAtomic follows a dangling relative `..` link under a symlinked directory', { skip: !posix }, () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'real', 'sub'), { recursive: true });
+    fs.symlinkSync(path.join(dir, 'real', 'sub'), path.join(dir, 'alias'));
+    fs.symlinkSync(path.join('..', 'new.json'), path.join(dir, 'real', 'sub', 'link.json'));
+
+    writeFileAtomic(path.join(dir, 'alias', 'link.json'), 'created');
+
+    assert.equal(fs.readFileSync(path.join(dir, 'real', 'new.json'), 'utf-8'), 'created');
+    assert.equal(fs.readFileSync(path.join(dir, 'alias', 'link.json'), 'utf-8'), 'created');
+});
+
 test('samePathKey identifies the same file through symlinks and, on macOS/Windows, case', { skip: !posix }, () => {
     const dir = tmp();
     const file = path.join(dir, 'Settings.json');

@@ -37,10 +37,20 @@ export function resolveProfilePath(filePath: string, baseDir: string | undefined
 /**
  * The file a write to `absolutePath` should land on: symlinks are followed —
  * including dangling ones, whose target gets created — so a link managed by
- * a dotfile tool stays a link.
+ * a dotfile tool stays a link. Relative link targets are resolved against the
+ * *real* directory of the link, as the OS does (a textual `..` under a
+ * symlinked directory would point somewhere else). When the path exists, the
+ * result is checked to be the very file the OS opens for it.
  */
 function resolveWriteTarget(absolutePath: string): string {
-    let target = absolutePath;
+    const inRealDir = (p: string) => {
+        try {
+            return path.join(fs.realpathSync(path.dirname(p)), path.basename(p));
+        } catch {
+            return p; // parent missing: the write will fail with ENOENT
+        }
+    };
+    let target = inRealDir(absolutePath);
     for (let hops = 0; hops < 40; hops++) {
         let stat: fs.Stats;
         try {
@@ -48,8 +58,14 @@ function resolveWriteTarget(absolutePath: string): string {
         } catch {
             return target; // doesn't exist (yet)
         }
-        if (!stat.isSymbolicLink()) return fs.realpathSync(target);
-        target = path.resolve(path.dirname(target), fs.readlinkSync(target));
+        if (!stat.isSymbolicLink()) {
+            const resolved = fs.realpathSync(target);
+            if (resolved !== fs.realpathSync(absolutePath)) {
+                throw new Error(`Refusing to write ${absolutePath}: its symlinks resolve inconsistently.`);
+            }
+            return resolved;
+        }
+        target = inRealDir(path.resolve(path.dirname(target), fs.readlinkSync(target)));
     }
     throw new Error(`Too many levels of symbolic links: ${absolutePath}`);
 }
