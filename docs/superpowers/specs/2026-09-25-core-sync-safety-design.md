@@ -103,7 +103,7 @@ A `sync-state/` directory next to `neon-sync.json` (VS Code: globalStorage) hold
 }
 ```
 
-Key = `(tableName, id, localPath)`, **not** profile name: renaming a profile keeps its history; pointing it at a different file or record correctly starts fresh. The table part uses the same rule as Part 2's duplicate check (unqualified, lowercased); id and path are exact. The stored key is re-checked on read, so a filename-hash collision reads as "no baseline".
+Key = `(tableName, id, localPath)`, **not** profile name: renaming a profile keeps its history; pointing it at a different file or record correctly starts fresh. The table part is lowercased but kept schema-qualified as written — deliberately *not* Part 2's unqualified rule: there a false match only means "sync separately", but here `prod.records` and `staging.records` sharing a baseline would let syncing one make the other's plan a confident wrong-way download (reproduced in review). A false *miss* (`records` vs `public.records`) only costs a baseline. Id and path are exact. The stored key is re-checked on read, so a filename-hash collision reads as "no baseline".
 
 Why one file per key (originally a single `sync-state.json`, changed after review): with a shared file, two writers doing read-modify-write for *different* profiles could restore the other's *previous* baseline — not merely lose it — and a stale baseline can turn a real local revert into a silent download. Separate files make cross-profile races impossible and confine a bad file to its own profile. Same-profile concurrent writes are last-writer-wins, matching two syncs of that profile racing anyway.
 

@@ -46,12 +46,15 @@ export function filterFingerprint(excludeKeys: ReadonlyArray<KeyPath>): string {
 }
 
 /**
- * Same table rule as RecordStore's duplicate check: unqualified and
- * lowercased, since `records` and `public.records` usually name one table.
- * Ids and paths are compared exactly.
+ * Table name lowercased (unquoted identifiers are case-insensitive) but kept
+ * qualified as written. Unlike RecordStore's duplicate check, a false match
+ * here is dangerous: `prod.records` and `staging.records` sharing a baseline
+ * would let one table's sync make the other's plan a confident wrong-way
+ * download. Treating `records` and `public.records` as different only costs
+ * a missing baseline, which is safe. Ids and paths are compared exactly.
  */
 function canonicalKey(key: SyncStateKey): string {
-    return JSON.stringify([key.tableName.toLowerCase().split('.').pop(), key.id, key.localPath]);
+    return JSON.stringify([key.tableName.toLowerCase(), key.id, key.localPath]);
 }
 
 function isBaseline(value: unknown): value is SyncBaseline {

@@ -51,11 +51,18 @@ test('each key lives in its own file; put replaces only that key', () => {
     assert.equal(store.get(entry({ id: 'other' }))?.baseHash, hashProjection('base'));
 });
 
-test('keys: table is unqualified and case-insensitive; id and path are exact; name is irrelevant', () => {
+test('keys: table is case-insensitive but schema-qualified as written; id and path are exact; name is irrelevant', () => {
     const store = new SyncStateStore(tempStateDir());
     store.put(entry());
+    store.put(entry({ tableName: 'prod.records', baseHash: 'prod' }));
 
-    assert.ok(store.get({ tableName: 'PUBLIC.JSON_RECORDS', id: 'rec', localPath: '/abs/file.json' }));
+    assert.ok(store.get({ tableName: 'JSON_RECORDS', id: 'rec', localPath: '/abs/file.json' }));
+    assert.equal(store.get({ tableName: 'public.json_records', id: 'rec', localPath: '/abs/file.json' }), undefined);
+    assert.equal(
+        store.get({ tableName: 'staging.records', id: 'rec', localPath: '/abs/file.json' }),
+        undefined,
+        'mirrored tables in different schemas must not share a baseline'
+    );
     assert.equal(store.get({ tableName: 'json_records', id: 'REC', localPath: '/abs/file.json' }), undefined);
     assert.equal(store.get({ tableName: 'json_records', id: 'rec', localPath: '/abs/other.json' }), undefined);
 });
