@@ -76,6 +76,7 @@ This removes the clock-skew problem for every profile that has synced once, and 
 
 - Edits confined to `excludeKeys` never count as a change (that's what excluding them means).
 - If the profile's `excludeKeys` list changes, every old hash is meaningless. Each entry therefore stores `filterFingerprint = sha256(JSON.stringify(sorted normalized paths))`; mismatch ⇒ treat as no baseline.
+- Projections come from `stripKeys`, which removes each excluded property together with its trailing comma and, when the property owns its line, that line including its own same-line `//` comment. All other comments and formatting survive (an earlier `jsonc-parser`-based strip also deleted the *neighbouring* key's comment, which let a comment-only edit hide from change detection; fixed in `9c87b9b`/`6557c99`, and a strip → merge round trip now reproduces the original projection exactly). Consequences: (a) an edit to the excluded key's own same-line comment is invisible — accepted, that comment belongs to the excluded key; (b) the same content can project with slightly different whitespace depending on where an excluded key sat, and a `jsonc-parser` upgrade could shift outputs. (b) can only make a side look *changed* when it isn't — never hide a real change — so the worst case is an extra conflict prompt or a whitespace-only upload the diff already shows.
 
 A **single** hash is enough, defined as *the projection of what the remote holds after the sync*:
 
@@ -84,28 +85,34 @@ A **single** hash is enough, defined as *the projection of what the remote holds
 
 ### Storage
 
-`sync-state.json` next to `neon-sync.json` (VS Code: globalStorage). Written with the existing `atomicWriteJson`. Never synced — it describes *this* machine's view.
+A `sync-state/` directory next to `neon-sync.json` (VS Code: globalStorage) holding **one file per key**, named by a hash of the key. Never synced — it describes *this* machine's view.
 
 ```jsonc
+// sync-state/3f2a….json
 {
   "version": 1,
-  "entries": [
-    {
-      "tableName": "json_records",
-      "id": "antigravity-settings",
-      "localPath": "/Users/me/Library/.../settings.json", // resolved absolute path
-      "baseHash": "9f86d0…",
-      "filterFingerprint": "e3b0c4…",
-      "remoteVersion": "2026-09-25 08:12:44.123456", // see Part 2
-      "syncedAt": "2026-09-25T08:12:44.500Z"
-    }
-  ]
+  "entry": {
+    "tableName": "json_records",
+    "id": "antigravity-settings",
+    "localPath": "/Users/me/Library/.../settings.json", // resolved absolute path
+    "baseHash": "9f86d0…",
+    "filterFingerprint": "e3b0c4…",
+    "remoteVersion": "2cf24dba5fb0a30e…", // content hash, see Part 2
+    "syncedAt": "2026-09-25T08:12:44.500Z"
+  }
 }
 ```
 
-Key = `(tableName, id, localPath)`, **not** profile name: renaming a profile keeps its history; pointing it at a different file or record correctly starts fresh.
+Key = `(tableName, id, localPath)`, **not** profile name: renaming a profile keeps its history; pointing it at a different file or record correctly starts fresh. The table part uses the same rule as Part 2's duplicate check (unqualified, lowercased); id and path are exact. The stored key is re-checked on read, so a filename-hash collision reads as "no baseline".
 
-New core module `core/syncState.ts`: `SyncStateStore` with `get(key)`, `put(entry)`, `prune(validKeys)`. Read-modify-write per `put` (two VS Code windows racing on it lose at worst one baseline, which degrades to the legacy heuristic — acceptable).
+Why one file per key (originally a single `sync-state.json`, changed after review): with a shared file, two writers doing read-modify-write for *different* profiles could restore the other's *previous* baseline — not merely lose it — and a stale baseline can turn a real local revert into a silent download. Separate files make cross-profile races impossible and confine a bad file to its own profile. Same-profile concurrent writes are last-writer-wins, matching two syncs of that profile racing anyway.
+
+`core/syncState.ts`: `SyncStateStore` with `get(key)`, `put(entry)`, `delete(key)`. Failure handling — the state is a cache, so every read failure means "no baseline":
+- missing, corrupt, malformed or key-mismatched file ⇒ reads empty; the next `put` replaces it;
+- unreadable file (EACCES, EBUSY…) ⇒ reads empty, but `put` throws rather than overwrite what it couldn't read;
+- file with a different `version` ⇒ reads empty and is never overwritten (a newer client owns it).
+
+No automatic pruning in v1: relative profile paths resolve per workspace, so "not matching any current profile" doesn't mean "orphaned". Files are tiny.
 
 ### When the baseline is written
 
@@ -138,42 +145,49 @@ change: 'local' | 'remote' | 'both' | 'unknown';   // 'unknown' = no usable base
 
 ### Version token
 
-`update_time` is `TIMESTAMP` (µs precision); JS `Date` is ms. Comparing a round-tripped `Date` for equality would spuriously fail. Instead fetch an opaque token alongside the data:
+The token is a **hash of the row's content, computed server-side**:
 
 ```sql
-SELECT data, update_time, update_time::text AS version FROM <t> WHERE id = $1
+SELECT data, update_time, encode(sha256(convert_to(data::text, current_setting('server_encoding'))), 'hex') AS version FROM <t> WHERE id = $1
 ```
 
-`FetchedRecord` gains `version: string | null`. It is only ever sent back to the same server, so `DateStyle` formatting is stable.
+`FetchedRecord` gains `version: string | null` (null when the row is absent or its data is NULL). It is opaque to the client: only compared and sent back.
+
+Why not `update_time::text` (the original decision, reversed after review — see Decisions): the token must change whenever the content changes, and an `update_time`-based token doesn't guarantee that. It collides for two writes within one tick of the column's precision (`timestamp(0)`: same second ⇒ a stale write is accepted — reproduced); for `timestamptz` its text depends on the session `TimeZone`/`DateStyle`, so a setting change invalidates every stored token (reproduced); and writers that don't bump `update_time`, such as edits in the Neon console, would be invisible. A content hash has none of these problems. The one thing it can't see — content changed and then changed back (ABA) — is harmless: if the remote holds exactly what the user reviewed, overwriting it loses nothing. `sha256` rather than `md5`: `md5()` errors on FIPS-mode servers, and this expression runs on every fetch (including the extension's current read path). Bytes are taken in the server's own encoding (a no-op `convert_to`), not forced to UTF8, which would fail on invalid bytes in e.g. a `SQL_ASCII` database. `::text` also covers `json`/`jsonb` data columns.
 
 ### Conditional write
 
-Upload carries `expectedVersion` (the plan's `remote.version`, or `null` if the row didn't exist). One statement per row, same shape for single and batch:
+Upload carries an expectation `{ exists, version }` taken from the plan's fetched record. One statement per row, same shape for single and batch:
 
 ```sql
--- expectedVersion !== null
+-- expected.exists: row must still hold the same content
 WITH w AS (
   UPDATE <t> SET data = $2, update_time = CURRENT_TIMESTAMP
-  WHERE id = $1 AND update_time::text IS NOT DISTINCT FROM $3
-  RETURNING update_time::text AS version
+  WHERE id = $1 AND <version expr> IS NOT DISTINCT FROM $3
+  RETURNING <version expr> AS version
 )
 SELECT max(version) AS version, 1 / count(*)::int AS cas_ok FROM w;
 
--- expectedVersion === null (row must still be absent)
+-- !expected.exists: row must still be absent
 WITH w AS (
   INSERT INTO <t> (id, data, create_time, update_time)
   VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   ON CONFLICT (id) DO NOTHING
-  RETURNING update_time::text AS version
+  RETURNING <version expr> AS version
 )
 SELECT max(version) AS version, 1 / count(*)::int AS cas_ok FROM w;
 ```
 
-Why the `1 / count(*)` sentinel: `upsertMany` runs as a **non-interactive** HTTP transaction, which only rolls back if a statement *errors*. A zero-row UPDATE is not an error. The aggregate always yields one row, so a stale row divides by zero (`SQLSTATE 22012`) and aborts the whole batch — keeping `Confirm All` atomic without installing a server-side function. `RecordStore` maps `22012` from these statements to `StaleRemoteError`; to name the offending rows it re-runs `fetchMany` and compares versions.
+Why the `1 / count(*)` sentinel: `conditionalWriteMany` runs as a **non-interactive** HTTP transaction, which only rolls back if a statement *errors*. A zero-row UPDATE is not an error. The aggregate always yields one row, so a stale row divides by zero (`SQLSTATE 22012`) and aborts the whole batch — keeping `Confirm All` atomic without installing a server-side function. (Verified on real Postgres via PGlite: the CTE runs exactly once and the division can't be constant-folded, since it depends on the aggregate.)
 
-`IS NOT DISTINCT FROM` covers legacy rows whose `update_time` is `NULL`.
+On `22012`, `RecordStore` re-runs `fetchMany` and compares versions to name the stale rows:
+- some rows stale ⇒ `StaleRemoteError(profiles)`;
+- re-read fails ⇒ `StaleRemoteError([])` (stale is likely but unconfirmed);
+- re-read succeeds but nothing is stale ⇒ either a race already undone within one round trip (another writer changed the row and restored it, or created and deleted it) or a `22012` from elsewhere (a user trigger or CHECK). Retry the batch **once**: the race resolves (and writing is correct, since the remote again holds what the user reviewed); the other cause fails again and its original error is rethrown unchanged, never relabeled stale.
 
-`upsert` / `upsertMany` return the new `version`, which feeds `remoteVersion` in the baseline.
+A batch in which two items address the same row is rejected before any SQL: both can't be conditional on the same version (the first write changes it), so the second would always look stale. Rows are keyed on the *unqualified*, lowercased table name plus id, since `records` and `public.records` usually name the same table; same-named tables in two schemas are a false positive whose only cost is "sync them separately".
+
+`IS NOT DISTINCT FROM` covers rows whose `data` is `NULL`. Writes return the new `version`, which feeds `remoteVersion` in the baseline.
 
 ### Local guard (download side)
 
@@ -208,12 +222,14 @@ type ApplyOutcome =
 
 The extension's single and multi flows both call `engine.apply`; the webview keeps only presentation state (`busy`, active diff lock).
 
+**Upload also fixes a v0.7 bug:** today an upload writes the remote-merged bytes (`mergeBack(candidate, remoteOriginal)`) to the *local* file too, so the local machine's own values for excluded keys are replaced by the remote's — the opposite of what excludeKeys is for. `apply` writes each side merged against *its own* original: remote gets `mergeBack(candidate, remoteOriginal)`, local gets `mergeBack(candidate, localOriginal)`. Both have the same projection, so the baseline is unaffected.
+
 ---
 
 ## Rollout
 
-1. `version` column in fetch + `StaleRemoteError` + CAS statements in `RecordStore` (Part 2). Tests against the SQL mock: query shape, param order, `22012` mapping.
-2. `SyncStateStore` + `planSync` baseline input + `change` field (Part 1). Pure tests for the decision table and the filter-fingerprint reset.
+1. ✅ `version` in fetch + `StaleRemoteError` + CAS statements in `RecordStore` (Part 2). Tests: SQL shape and param order against the mock; semantics against real Postgres via PGlite (`test/core/db.cas.test.ts`).
+2. ✅ `SyncStateStore` + `planSync` baseline input + `change` field + `baselineAfterSync` (Part 1). Pure tests for the decision table and the filter-fingerprint reset.
 3. `SyncEngine.apply` (Part 3); migrate `sync.ts` and `multiSync.ts`; baseline writes per the table above.
 4. UX: conflict badge, stale-remote messages, `Re-sync` / `Reload`.
 5. CHANGELOG + README ("Auto-direction rules" section rewritten around the baseline table).
@@ -225,12 +241,12 @@ Upgrade path: no baseline exists at first, so behavior is identical to today unt
 - `plan`: every row of the baseline decision table; `unknown` fallback; `excludeKeys` change ⇒ `unknown`; edits confined to excluded keys ⇒ not a change; edited-download ⇒ next plan is `change: 'local'`.
 - `db`: CAS SQL shape for update vs insert-if-absent; `22012` → `StaleRemoteError`; non-CAS errors pass through; returned `version` parsed.
 - `engine`: batch with one stale row commits nothing; remote-committed + local-failed row writes no baseline and re-plans as `download`; local guard trips on a modified file.
-- `syncState`: keyed by `(table, id, path)` not name; atomic write; prune.
+- `syncState`: keyed by `(table, id, path)` not name; one file per key; corrupt / unreadable / foreign-version files each handled as specified; other keys unaffected.
 
 ## Decisions
 
 Resolved 2026-09-25 (previously open questions):
 
 1. **Hash only, not base content.** v1 stores `baseHash`, not a copy of the base projection. The entry shape stays extensible (a future `baseContentFile?` field) so three-way merge and a local last-synced backup can be added without a migration.
-2. **Version token is `update_time::text`**, not `xmin`. Every writer we control bumps `update_time`; `xmin` is Postgres-internal and 32-bit.
+2. **Version token is a server-side content hash (`sha256` of `data::text`).** Originally decided as `update_time::text`; reversed the same day after review reproduced three failures on PGlite (same-second collision under `timestamp(0)` accepting a stale write, `timestamptz` tokens changing with session `TimeZone`, console edits that skip `update_time`). See Part 2 → Version token. `xmin` was also rejected (Postgres-internal, 32-bit).
 3. **An `identical` plan refreshes the baseline.** It is a local-only write and is what bootstraps baselines for already-in-sync profiles right after upgrade.

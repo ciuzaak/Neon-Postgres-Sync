@@ -7,6 +7,7 @@ import {
     JsoncFilterParseError
 } from './jsoncFilter';
 import type { LocalSnapshot } from './localFile';
+import { filterFingerprint, hashProjection, SyncBaseline, SyncStateKey } from './syncState';
 import type { FetchedRecord, Profile, SyncDirection } from './types';
 
 // Local mtime (OS clock) and remote update_time (DB server clock) can drift.
@@ -26,6 +27,16 @@ export interface DirectionSuggestion {
  * - `pending`: a sync is needed; see `suggestion` for the proposed direction.
  */
 export type PlanStatus = 'missing-both' | 'parse-error' | 'identical' | 'pending';
+
+/**
+ * Which side changed since the last successful sync on this machine.
+ * - `none`: identical now.
+ * - `local` / `remote` / `both`: judged against a usable baseline.
+ * - `unknown`: no usable baseline (never synced here, excludeKeys changed
+ *   since, a side is missing, or a side doesn't parse) — direction falls back
+ *   to the timestamp heuristic.
+ */
+export type ChangeKind = 'none' | 'local' | 'remote' | 'both' | 'unknown';
 
 /** Raw originals plus the key filter — everything needed to finalize a candidate. */
 export interface MergeContext {
@@ -47,15 +58,23 @@ export interface SyncPlan extends MergeContext {
     localMtime: Date | null;
     remoteUpdateTime: Date | null;
     status: PlanStatus;
+    change: ChangeKind;
     suggestion: DirectionSuggestion;
     parseError?: JsoncFilterParseError;
 }
 
 /**
  * Compare one profile's local snapshot against its remote record and decide
- * what (if anything) a sync should do. Pure: performs no IO.
+ * what (if anything) a sync should do. With a baseline from this machine's
+ * last sync, each side is judged against it rather than against the other
+ * side's clock. Pure: performs no IO.
  */
-export function planSync(profile: Profile, local: LocalSnapshot, remote: FetchedRecord): SyncPlan {
+export function planSync(
+    profile: Profile,
+    local: LocalSnapshot,
+    remote: FetchedRecord,
+    baseline?: SyncBaseline
+): SyncPlan {
     const localExists = local.exists;
     const remoteExists = remote.data !== null;
     const localOriginal = local.content;
@@ -88,6 +107,36 @@ export function planSync(profile: Profile, local: LocalSnapshot, remote: Fetched
         status = 'pending';
     }
 
+    const timestampSuggestion = decideSyncDirection(localExists, remoteExists, local.mtime, remote.updateTime);
+
+    let change: ChangeKind = 'unknown';
+    let suggestion = timestampSuggestion;
+    const bothExist = status === 'pending' && localExists && remoteExists;
+    const baselineUsable = baseline !== undefined && baseline.filterFingerprint === filterFingerprint(excludeKeys);
+    if (status === 'identical') {
+        change = 'none';
+    } else if (bothExist && baselineUsable) {
+        const localChanged = hashProjection(localContent) !== baseline.baseHash;
+        const remoteChanged = hashProjection(remoteContent) !== baseline.baseHash;
+        // Content differs, so at least one side must differ from the base.
+        change = localChanged && remoteChanged ? 'both' : localChanged ? 'local' : 'remote';
+        const since = `since last sync (${baseline.syncedAt})`;
+        if (change === 'local') {
+            suggestion = { direction: 'upload', reason: `only local changed ${since}`, ambiguous: false };
+        } else if (change === 'remote') {
+            suggestion = { direction: 'download', reason: `only remote changed ${since}`, ambiguous: false };
+        } else {
+            suggestion = {
+                direction: timestampSuggestion.direction,
+                reason: `both local and remote changed ${since}`,
+                ambiguous: true
+            };
+        }
+    } else if (bothExist) {
+        const why = baseline ? 'excludeKeys changed since last sync' : 'no sync history';
+        suggestion = { ...timestampSuggestion, reason: `${why}; ${timestampSuggestion.reason}` };
+    }
+
     return {
         profile,
         localExists,
@@ -100,8 +149,35 @@ export function planSync(profile: Profile, local: LocalSnapshot, remote: Fetched
         remoteUpdateTime: remote.updateTime,
         excludeKeys,
         status,
-        suggestion: decideSyncDirection(localExists, remoteExists, local.mtime, remote.updateTime),
+        change,
+        suggestion,
         parseError
+    };
+}
+
+/**
+ * The baseline to record after this plan is resolved: `remoteRawAfter` is the
+ * remote row's raw content once the sync is done (the final bytes on upload;
+ * `plan.remoteOriginal` on download or when refreshing an identical plan).
+ * Hashing the remote side means destination-side edits made during a
+ * download show up as a local change next time. See spec Part 1.
+ */
+export function baselineAfterSync(
+    plan: Pick<SyncPlan, 'excludeKeys'>,
+    key: SyncStateKey,
+    remoteRawAfter: string,
+    remoteVersion: string | null,
+    syncedAt: Date
+): SyncBaseline {
+    const projection = plan.excludeKeys.length > 0 ? stripKeys(remoteRawAfter, plan.excludeKeys) : remoteRawAfter;
+    return {
+        tableName: key.tableName,
+        id: key.id,
+        localPath: key.localPath,
+        baseHash: hashProjection(projection),
+        filterFingerprint: filterFingerprint(plan.excludeKeys),
+        remoteVersion,
+        syncedAt: syncedAt.toISOString()
     };
 }
 
