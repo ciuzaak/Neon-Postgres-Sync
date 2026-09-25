@@ -74,6 +74,93 @@ const MODIFY_OPTIONS: jsoncParser.ModificationOptions = {
     formattingOptions: { tabSize: 4, insertSpaces: true }
 };
 
+/** First non-trivia token at or after `offset` (whitespace, line breaks and comments skipped). */
+function nextSignificantToken(text: string, offset: number): { kind: jsoncParser.SyntaxKind; offset: number } {
+    const scanner = jsoncParser.createScanner(text.slice(offset), false);
+    for (;;) {
+        const kind = scanner.scan();
+        if (
+            kind !== jsoncParser.SyntaxKind.Trivia
+            && kind !== jsoncParser.SyntaxKind.LineBreakTrivia
+            && kind !== jsoncParser.SyntaxKind.LineCommentTrivia
+            && kind !== jsoncParser.SyntaxKind.BlockCommentTrivia
+        ) {
+            return { kind, offset: offset + scanner.getTokenOffset() };
+        }
+    }
+}
+
+/** Offset of the last `,` before `offset` if only trivia separates them, else -1. */
+function precedingComma(text: string, objectStart: number, offset: number): number {
+    const scanner = jsoncParser.createScanner(text.slice(objectStart, offset), false);
+    let lastSignificant: { kind: jsoncParser.SyntaxKind; offset: number } | undefined;
+    for (let kind = scanner.scan(); kind !== jsoncParser.SyntaxKind.EOF; kind = scanner.scan()) {
+        if (
+            kind !== jsoncParser.SyntaxKind.Trivia
+            && kind !== jsoncParser.SyntaxKind.LineBreakTrivia
+            && kind !== jsoncParser.SyntaxKind.LineCommentTrivia
+            && kind !== jsoncParser.SyntaxKind.BlockCommentTrivia
+        ) {
+            lastSignificant = { kind, offset: objectStart + scanner.getTokenOffset() };
+        }
+    }
+    return lastSignificant?.kind === jsoncParser.SyntaxKind.CommaToken ? lastSignificant.offset : -1;
+}
+
+/**
+ * Edits that delete one object property while leaving every comment that
+ * isn't the property's own in place. jsonc-parser's `modify(…, undefined)`
+ * deletes from the previous comma, which swallows the neighbouring key's
+ * trailing comment (and any comment lines above the removed key) — silent
+ * data loss once the text is written back.
+ *
+ * Rules:
+ * - The property's own span always goes, plus its trailing comma if any.
+ * - If it sits alone on its line(s), the whole line goes, including a
+ *   trailing `//` comment on that same line (that comment is about it).
+ * - If it is the last property, the comma before it goes (just that one
+ *   character; comments after the comma stay).
+ */
+function propertyRemovalEdits(text: string, property: jsoncParser.Node): jsoncParser.Edit[] {
+    const start = property.offset;
+    const end = property.offset + property.length;
+    const next = nextSignificantToken(text, end);
+    const hasTrailingComma = next.kind === jsoncParser.SyntaxKind.CommaToken;
+    const removeTo = hasTrailingComma ? next.offset + 1 : end;
+
+    const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+    const newline = text.indexOf('\n', removeTo);
+    const lineEnd = newline === -1 ? text.length : newline + 1;
+    const ownsLine = /^[ \t]*$/.test(text.slice(lineStart, start))
+        && /^[ \t]*(\/\/[^\n]*)?\r?\n?$/.test(text.slice(removeTo, lineEnd));
+
+    let inlineEnd = removeTo;
+    if (hasTrailingComma) {
+        while (text[inlineEnd] === ' ' || text[inlineEnd] === '\t') inlineEnd++;
+    }
+    const edits: jsoncParser.Edit[] = ownsLine
+        ? [{ offset: lineStart, length: lineEnd - lineStart, content: '' }]
+        : [{ offset: start, length: inlineEnd - start, content: '' }];
+
+    if (!hasTrailingComma && property.parent) {
+        const comma = precedingComma(text, property.parent.offset + 1, start);
+        if (comma !== -1) edits.push({ offset: comma, length: 1, content: '' });
+    }
+    return edits;
+}
+
+/**
+ * Remove the property at `path` if it exists (no-op otherwise). Returns the
+ * new text. Only object properties are addressable (see parsePaths).
+ */
+function removeProperty(text: string, path: KeyPath): string {
+    const tree = jsoncParser.parseTree(text, [], PARSE_OPTIONS);
+    const valueNode = tree ? jsoncParser.findNodeAtLocation(tree, [...path]) : undefined;
+    const property = valueNode?.parent;
+    if (!property || property.type !== 'property') return text;
+    return jsoncParser.applyEdits(text, propertyRemovalEdits(text, property));
+}
+
 /**
  * Returns `text` with every key at the given paths removed. Comments and
  * formatting on remaining keys are preserved. No-op when a path does not exist
@@ -86,15 +173,7 @@ export function stripKeys(text: string, paths: ReadonlyArray<KeyPath>): string {
     const ordered = [...paths].sort((a, b) => b.length - a.length);
     let current = text;
     for (const path of ordered) {
-        let edits: jsoncParser.Edit[];
-        try {
-            edits = jsoncParser.modify(current, [...path], undefined, MODIFY_OPTIONS);
-        } catch {
-            // path does not exist or is unreachable — treat as no-op
-            continue;
-        }
-        if (edits.length === 0) continue;
-        current = jsoncParser.applyEdits(current, edits);
+        current = removeProperty(current, path);
     }
     return current;
 }
@@ -124,16 +203,16 @@ export function mergeBack(
     for (const path of ordered) {
         const destNode = destTree ? jsoncParser.findNodeAtLocation(destTree, [...path]) : undefined;
         const replacement = destNode ? jsoncParser.getNodeValue(destNode) : undefined;
-        // `replacement === undefined` deletes the key in candidate via modify().
+        if (replacement === undefined) {
+            // Destination has no value: delete from candidate without eating
+            // neighbouring comments. No-op if candidate can't reach the path.
+            current = removeProperty(current, path);
+            continue;
+        }
         let edits: jsoncParser.Edit[];
         try {
             edits = jsoncParser.modify(current, [...path], replacement, MODIFY_OPTIONS);
         } catch (e) {
-            if (replacement === undefined) {
-                // Destination has no value for this path; we wanted to delete
-                // from candidate, but the path is unreachable there too. No-op.
-                continue;
-            }
             // Destination has a value but candidate's structure blocks restoring it.
             // Silent swallow would lose the destination value — surface to caller.
             throw new JsoncFilterMergeError(path, e);

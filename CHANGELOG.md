@@ -2,6 +2,10 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [Unreleased]
+### Fixed
+- **Key Filtering Lost Neighbouring Comments**: With `excludeKeys` active, removing a filtered key also deleted the comment trailing the previous key (e.g. `"fontSize": 14, // why 14`) and any comment lines just above the filtered key. The comment vanished from the diff and, once confirmed, from the written file on both sides. Only the filtered key and its own same-line comment are removed now.
+
 ## [0.7.0] - 2026-05-19
 ### Added
 - **Per-Profile Key Filtering (JSON/JSONC only)**: New `excludeKeys` field on each profile lists dot-separated key paths that should be hidden from the diff view and preserved on the target side at confirm time. Useful for machine-specific or transient keys (themes, machine IDs, locally chosen font sizes) that shouldn't propagate across machines. Edit via the settings panel's Advanced section in the Add/Edit Profile modal, or directly in `neon-sync.json`. Comments and formatting on non-filtered keys are preserved (powered by `jsonc-parser`).

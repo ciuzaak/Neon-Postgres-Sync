@@ -110,6 +110,40 @@ test('stripKeys preserves comments on surviving keys', () => {
     assert.equal(out.includes('"b"'), false);
 });
 
+test('stripKeys keeps the previous key\'s trailing comment when removing the last key', () => {
+    const out = stripKeys('{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n', [['theme']]);
+    assert.equal(out, '{\n    "fontSize": 14 // why 14\n}\n');
+});
+
+test('stripKeys keeps comment lines above the removed key', () => {
+    const out = stripKeys('{\n    "a": 1,\n    // about theme\n    "theme": "dark"\n}', [['theme']]);
+    assert.equal(out, '{\n    "a": 1\n    // about theme\n}');
+});
+
+test('stripKeys removes a key\'s own same-line comment but keeps the next key\'s', () => {
+    const out = stripKeys('{\n    "a": 1,\n    "theme": "dark", // mine\n    "b": 2 // keep\n}\n', [['theme']]);
+    assert.equal(out, '{\n    "a": 1,\n    "b": 2 // keep\n}\n');
+});
+
+test('stripKeys removes inline keys cleanly in any position', () => {
+    assert.equal(stripKeys('{"a": 1, "theme": "dark", "b": 2}', [['theme']]), '{"a": 1, "b": 2}');
+    assert.equal(stripKeys('{"theme": "dark", "a": 1}', [['theme']]), '{"a": 1}');
+    assert.equal(stripKeys('{"a": 1, /*c*/ "theme": "dark"}', [['theme']]), '{"a": 1 /*c*/ }');
+});
+
+test('stripKeys preserves CRLF line endings', () => {
+    const out = stripKeys('{\r\n    "a": 1, // x\r\n    "theme": "dark"\r\n}\r\n', [['theme']]);
+    assert.equal(out, '{\r\n    "a": 1 // x\r\n}\r\n');
+});
+
+test('stripKeys removes a multi-line value and a nested key', () => {
+    assert.deepEqual(
+        JSON.parse(stripKeys('{\n    "a": 1,\n    "obj": {\n        "x": [1,\n 2]\n    },\n    "z": 3\n}', [['obj']])),
+        { a: 1, z: 3 }
+    );
+    assert.equal(stripKeys('{"o": {"k": 1, "theme": 2}}', [['o', 'theme']]), '{"o": {"k": 1 }}');
+});
+
 test('stripKeys tolerates trailing commas in the input', () => {
     const out = stripKeys('{"a": 1, "b": 2,}', [['a']]);
     const parsed = JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
@@ -142,6 +176,19 @@ test('mergeBack removes filtered key from candidate when destination lacks it', 
     const destination = '{"a": 0}';
     const out = mergeBack(candidate, destination, [['stale']]);
     assert.deepEqual(JSON.parse(out), { a: 1 });
+});
+
+test('mergeBack deleting a key keeps the neighbouring key\'s comment', () => {
+    const out = mergeBack('{\n    "a": 1, // note\n    "stale": true\n}', '{"a": 0}', [['stale']]);
+    assert.equal(out, '{\n    "a": 1 // note\n}');
+});
+
+test('upload round trip keeps a comment next to an excluded key', () => {
+    const local = '{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n';
+    const remote = '{\n    "fontSize": 16,\n    "theme": "light"\n}\n';
+    const final = mergeBack(stripKeys(local, [['theme']]), remote, [['theme']]);
+    assert.match(final, /\/\/ why 14/);
+    assert.deepEqual(JSON.parse(final.replace(/\/\/.*$/gm, '')), { fontSize: 14, theme: 'light' });
 });
 
 test('mergeBack with neither side holding the filtered key is a no-op', () => {
