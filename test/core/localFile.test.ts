@@ -121,6 +121,37 @@ test('writeFileAtomic follows a dangling relative `..` link under a symlinked di
     assert.equal(fs.readFileSync(path.join(dir, 'alias', 'link.json'), 'utf-8'), 'created');
 });
 
+test('writeFileAtomic handles link text that walks up out of a symlinked directory (`dir-link/..`)', { skip: !posix }, () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'real', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'real', 'settings.json'), 'v1');
+    fs.writeFileSync(path.join(dir, 'settings.json'), 'unrelated');
+    fs.symlinkSync(path.join(dir, 'real', 'sub'), path.join(dir, 'alias2'));
+    const link = path.join(dir, 'link.json');
+    fs.symlinkSync('alias2/../settings.json', link);
+    assert.equal(fs.readFileSync(link, 'utf-8'), 'v1', 'the OS opens real/settings.json');
+
+    writeFileAtomic(link, 'v2');
+
+    assert.equal(fs.readFileSync(link, 'utf-8'), 'v2');
+    assert.equal(fs.readFileSync(path.join(dir, 'settings.json'), 'utf-8'), 'unrelated');
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+});
+
+test('writeFileAtomic creates the target of a dangling `dir-link/..` link where the OS would', { skip: !posix }, () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'real', 'sub'), { recursive: true });
+    fs.symlinkSync(path.join(dir, 'real', 'sub'), path.join(dir, 'alias2'));
+    const link = path.join(dir, 'link.json');
+    fs.symlinkSync('alias2/../fresh.json', link);
+
+    writeFileAtomic(link, 'made');
+
+    assert.equal(fs.readFileSync(path.join(dir, 'real', 'fresh.json'), 'utf-8'), 'made');
+    assert.equal(fs.existsSync(path.join(dir, 'fresh.json')), false);
+    assert.equal(fs.readFileSync(link, 'utf-8'), 'made');
+});
+
 test('samePathKey identifies the same file through symlinks and, on macOS/Windows, case', { skip: !posix }, () => {
     const dir = tmp();
     const file = path.join(dir, 'Settings.json');

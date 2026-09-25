@@ -35,37 +35,38 @@ export function resolveProfilePath(filePath: string, baseDir: string | undefined
 }
 
 /**
- * The file a write to `absolutePath` should land on: symlinks are followed —
- * including dangling ones, whose target gets created — so a link managed by
- * a dotfile tool stays a link. Relative link targets are resolved against the
- * *real* directory of the link, as the OS does (a textual `..` under a
- * symlinked directory would point somewhere else). When the path exists, the
- * result is checked to be the very file the OS opens for it.
+ * The file a write to `absolutePath` should land on — the same file the OS
+ * opens when reading it. Resolution is left to the OS (`realpath.native`)
+ * rather than emulated: JS path helpers collapse `..` textually, which differs
+ * from the OS whenever `..` follows a symlinked directory, and writing a
+ * different file than the one read turns the next plan into a confident
+ * wrong-way upload.
+ *
+ * Symlinks are followed, dangling ones included (their target is created),
+ * so a link managed by a dotfile tool stays a link. Link text is joined to
+ * its real directory without normalization and handed to the OS as is.
  */
 function resolveWriteTarget(absolutePath: string): string {
-    const inRealDir = (p: string) => {
-        try {
-            return path.join(fs.realpathSync(path.dirname(p)), path.basename(p));
-        } catch {
-            return p; // parent missing: the write will fail with ENOENT
-        }
-    };
-    let target = inRealDir(absolutePath);
+    try {
+        return fs.realpathSync.native(absolutePath); // exists: exactly what the OS opens
+    } catch { /* missing, or a dangling symlink */ }
+
+    let link = absolutePath;
     for (let hops = 0; hops < 40; hops++) {
+        // path.dirname is lexical: `a/dir-link/..` stays unnormalized for the OS.
+        const parent = fs.realpathSync.native(path.dirname(link));
+        const candidate = `${parent}${path.sep}${path.basename(link)}`;
         let stat: fs.Stats;
         try {
-            stat = fs.lstatSync(target);
+            stat = fs.lstatSync(candidate);
         } catch {
-            return target; // doesn't exist (yet)
+            return candidate; // nothing there yet: create it
         }
         if (!stat.isSymbolicLink()) {
-            const resolved = fs.realpathSync(target);
-            if (resolved !== fs.realpathSync(absolutePath)) {
-                throw new Error(`Refusing to write ${absolutePath}: its symlinks resolve inconsistently.`);
-            }
-            return resolved;
+            return fs.realpathSync.native(candidate);
         }
-        target = inRealDir(path.resolve(path.dirname(target), fs.readlinkSync(target)));
+        const text = fs.readlinkSync(candidate);
+        link = path.isAbsolute(text) ? text : `${parent}${path.sep}${text}`;
     }
     throw new Error(`Too many levels of symbolic links: ${absolutePath}`);
 }
