@@ -35,22 +35,43 @@ export function resolveProfilePath(filePath: string, baseDir: string | undefined
 }
 
 /**
+ * The file a write to `absolutePath` should land on: symlinks are followed —
+ * including dangling ones, whose target gets created — so a link managed by
+ * a dotfile tool stays a link.
+ */
+function resolveWriteTarget(absolutePath: string): string {
+    let target = absolutePath;
+    for (let hops = 0; hops < 40; hops++) {
+        let stat: fs.Stats;
+        try {
+            stat = fs.lstatSync(target);
+        } catch {
+            return target; // doesn't exist (yet)
+        }
+        if (!stat.isSymbolicLink()) return fs.realpathSync(target);
+        target = path.resolve(path.dirname(target), fs.readlinkSync(target));
+    }
+    throw new Error(`Too many levels of symbolic links: ${absolutePath}`);
+}
+
+/**
  * Replace `absolutePath`'s content atomically: write a sibling temp file, then
  * rename it over the target, so a failure midway (disk full, size limit,
  * crash) leaves either the old file or the new one — never a fragment that a
- * later sync would read as a local edit.
+ * later sync would read as a local edit and upload.
  *
- * - A symlink is followed and its target replaced (dotfile managers link
- *   files into place; replacing the link would silently unmanage it).
+ * - Symlinks are followed (see resolveWriteTarget); hard links are not
+ *   preserved (rename gives the path a new inode — inherent to atomic writes).
  * - The existing file's permission bits are kept.
  * - A file the user can't write stays unwritable: rename would otherwise
  *   bypass a read-only file, so that is checked explicitly (EACCES).
+ * - A directory that can't take the temp file fails the write rather than
+ *   falling back to an in-place write, which could leave a fragment.
  */
 export function writeFileAtomic(absolutePath: string, content: string): void {
-    let target = absolutePath;
+    const target = resolveWriteTarget(absolutePath);
     let mode: number | undefined;
-    if (fs.existsSync(absolutePath)) {
-        target = fs.realpathSync(absolutePath);
+    if (fs.existsSync(target)) {
         fs.accessSync(target, fs.constants.W_OK);
         mode = fs.statSync(target).mode & 0o7777;
     }
@@ -61,12 +82,6 @@ export function writeFileAtomic(absolutePath: string, content: string): void {
         fs.renameSync(temp, target);
     } catch (e) {
         try { fs.unlinkSync(temp); } catch { /* swallow: may not exist */ }
-        // A read-only directory holding a writable file can't take a temp
-        // file; fall back to writing in place rather than refusing outright.
-        if ((e as NodeJS.ErrnoException).code === 'EACCES' && mode !== undefined && !fs.existsSync(temp)) {
-            fs.writeFileSync(target, content);
-            return;
-        }
         throw e;
     }
 }

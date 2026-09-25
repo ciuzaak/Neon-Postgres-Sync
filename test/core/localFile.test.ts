@@ -53,17 +53,29 @@ test('writeFileAtomic refuses a read-only file (rename would bypass it)', { skip
     }
 });
 
-test('writeFileAtomic falls back to an in-place write in a read-only directory', { skip: !posix || root }, () => {
+test('writeFileAtomic refuses a read-only directory rather than writing in place (no fragments)', { skip: !posix || root }, () => {
     const dir = tmp();
     const file = path.join(dir, 'a.json');
     fs.writeFileSync(file, 'old');
     fs.chmodSync(dir, 0o555);
     try {
-        writeFileAtomic(file, 'new');
-        assert.equal(fs.readFileSync(file, 'utf-8'), 'new');
+        assert.throws(() => writeFileAtomic(file, 'new'), /EACCES/);
+        assert.equal(fs.readFileSync(file, 'utf-8'), 'old');
     } finally {
         fs.chmodSync(dir, 0o755);
     }
+});
+
+test('writeFileAtomic follows a dangling symlink and creates its target', { skip: !posix }, () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'dotfiles'));
+    const link = path.join(dir, 'settings.json');
+    fs.symlinkSync(path.join('dotfiles', 'settings.json'), link); // relative, dangling
+
+    writeFileAtomic(link, 'new');
+
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+    assert.equal(fs.readFileSync(path.join(dir, 'dotfiles', 'settings.json'), 'utf-8'), 'new');
 });
 
 test('a write that fails midway (file size limit) leaves the original intact and no temp file', { skip: !posix }, () => {

@@ -157,8 +157,13 @@ export class SyncEngine {
         }
 
         const guarded = prepared.filter((p) => {
-            if (this.localUnchanged(p)) return true;
-            outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted: false });
+            try {
+                if (this.localUnchanged(p)) return true;
+                outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted: false });
+            } catch (e) {
+                const error = e instanceof Error ? e.message : String(e);
+                outcomes.set(p.request, { kind: 'local-write-failed', request: p.request, error, remoteCommitted: false, retryPlan: p.request.plan });
+            }
             return false;
         });
 
@@ -196,12 +201,14 @@ export class SyncEngine {
             // Baselines come from what the row holds (canonicalized for jsonb), not the bytes sent.
             const remoteAfter = p.remoteStored ?? plan.remoteOriginal;
             const remoteCommitted = p.remoteStored !== undefined;
-            // Check again: the remote round trip above leaves time for a save.
-            if (!this.localUnchanged(p)) {
-                outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted });
-                continue;
-            }
             try {
+                // Check again: the remote round trip above leaves time for a save.
+                // Inside the try: the file may also have become unreadable meanwhile,
+                // and that must not abort the other rows after a remote commit.
+                if (!this.localUnchanged(p)) {
+                    outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted });
+                    continue;
+                }
                 if (!(plan.localExists && p.localBytes === plan.localOriginal)) {
                     writeFileAtomic(p.localPath, p.localBytes);
                 }

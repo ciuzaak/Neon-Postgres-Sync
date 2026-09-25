@@ -6,6 +6,23 @@ import { profilesSharingLocalFiles, SyncEngine } from './core/engine';
 import { resolveProfilePath } from './core/localFile';
 import { SyncStateStore } from './core/syncState';
 
+/**
+ * Profiles among `profiles` that share their local file with any configured
+ * profile (they'd corrupt each other's sync history), mapped by name to a
+ * message naming both profiles and both paths.
+ */
+export function sharedFileClashes(profiles: Profile[]): Map<string, string> {
+    const names = new Set(profiles.map((p) => p.name));
+    const out = new Map<string, string>();
+    for (const [a, b] of profilesSharingLocalFiles(ConfigManager.getProfiles(), resolveWorkspacePath)) {
+        const message = `Profiles "${a.name}" (${a.filePath}) and "${b.name}" (${b.filePath}) use the same local file. Give each profile its own file.`;
+        for (const p of [a, b]) {
+            if (names.has(p.name) && !out.has(p.name)) out.set(p.name, message);
+        }
+    }
+    return out;
+}
+
 /** Relative profile paths anchor to the first workspace folder, if any. */
 export function resolveWorkspacePath(filePath: string): string {
     return resolveProfilePath(filePath, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
@@ -21,13 +38,9 @@ export function resolveWorkspacePath(filePath: string): string {
  */
 export async function createSyncEngine(profiles: Profile[]): Promise<SyncEngine> {
     profiles.forEach((p) => assertValidTableName(p.tableName));
-    const names = new Set(profiles.map((p) => p.name));
-    const clash = profilesSharingLocalFiles(ConfigManager.getProfiles(), resolveWorkspacePath)
-        .find(([a, b]) => names.has(a.name) || names.has(b.name));
-    if (clash) {
-        throw new Error(
-            `Profiles "${clash[0].name}" and "${clash[1].name}" use the same local file (${clash[1].filePath}). Give each profile its own file.`
-        );
+    const clashes = sharedFileClashes(profiles);
+    if (clashes.size > 0) {
+        throw new Error([...clashes.values()][0]);
     }
     const store = await DatabaseService.getRecordStore();
     const stateDir = ConfigManager.getSyncStateDir();

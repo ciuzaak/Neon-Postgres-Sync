@@ -180,6 +180,10 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage('A multi-profile sync panel is already open.');
             return;
         }
+        if (SyncManager.hasActiveSession()) {
+            vscode.window.showWarningMessage('Finish or cancel the open sync diff first.');
+            return;
+        }
 
         const profiles = ConfigManager.getProfiles();
         if (profiles.length === 0) {

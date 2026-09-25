@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConfigManager, Profile } from './config';
 import { SyncManager } from './sync';
-import { createSyncEngine } from './hostEngine';
+import { createSyncEngine, sharedFileClashes } from './hostEngine';
 import type { ApplyOutcome, ApplyRequest } from './core/engine';
 import { candidateFor, computeDiffStats, SyncPlan } from './core/plan';
 import type { SyncDirection } from './core/types';
@@ -50,9 +50,11 @@ export class MultiSyncManager {
     private static items: MultiSyncItem[] = [];
     private static activeDiffProfile: string | null = null;
     private static confirmAllInFlight = false;
+    private static loading = false;
 
+    /** The panel is open or still loading. */
     static isActive(): boolean {
-        return this.panel !== null;
+        return this.panel !== null || this.loading;
     }
 
     static async start(profileNames: string[]): Promise<void> {
@@ -60,15 +62,37 @@ export class MultiSyncManager {
             this.panel.reveal();
             return;
         }
+        if (this.loading) return;
+        // A diff left open from a previous panel would apply to that panel's
+        // stale rows while this one shows fresh ones.
+        if (SyncManager.hasActiveSession()) {
+            vscode.window.showWarningMessage('Finish or cancel the open sync diff first.');
+            return;
+        }
+        this.loading = true;
+        try {
+            await this.load(profileNames);
+        } finally {
+            this.loading = false;
+        }
+    }
 
-        const profiles: Profile[] = [];
+    private static async load(profileNames: string[]): Promise<void> {
+        const selected: Profile[] = [];
         for (const name of profileNames) {
             const profile = ConfigManager.getProfile(name);
-            if (profile) profiles.push(profile);
+            if (profile) selected.push(profile);
         }
 
+        // Skip only the profiles that share a file; the rest can still sync.
+        const clashes = sharedFileClashes(selected);
+        if (clashes.size > 0) {
+            vscode.window.showWarningMessage(`Skipped ${[...clashes.keys()].join(', ')}: ${[...new Set(clashes.values())].join(' ')}`);
+        }
+        const profiles = selected.filter((p) => !clashes.has(p.name));
+
         if (profiles.length === 0) {
-            vscode.window.showWarningMessage('No valid profiles selected.');
+            if (clashes.size === 0) vscode.window.showWarningMessage('No valid profiles selected.');
             return;
         }
 
@@ -327,7 +351,7 @@ export class MultiSyncManager {
         try {
             outcomes = await (await createSyncEngine(requests.map((r) => r.plan.profile))).apply(requests);
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Failed to commit uploads: ${error.message}. No changes were applied.`);
+            vscode.window.showErrorMessage(`Sync failed: ${error.message}. No changes were applied.`);
             return;
         }
 

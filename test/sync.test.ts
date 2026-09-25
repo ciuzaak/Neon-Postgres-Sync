@@ -181,6 +181,6 @@ test('single sync: a profile sharing its local file with another configured prof
 
     await SyncManager.startSync(p.name);
 
-    assert.match(vscode.window.errorMessages.at(-1)!, /Profiles "solo" and "twin" use the same local file \(solo\.json\)/);
+    assert.match(vscode.window.errorMessages.at(-1)!, /Profiles "solo" \(solo\.json\) and "twin" \(solo\.json\) use the same local file/);
     assert.equal(fs.readFileSync(file, 'utf-8'), 'mine');
 });

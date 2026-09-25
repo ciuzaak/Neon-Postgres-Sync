@@ -298,3 +298,27 @@ test('uploading an empty file to a missing row creates the row', async () => {
     assert.equal(outcome.kind, 'ok');
     assert.equal(await remoteOf('a'), '');
 });
+
+test('a local file that becomes unreadable after the remote commit fails only its own row', { skip: process.getuid?.() === 0 }, async () => {
+    const { engine, pg, dir, localOf, remoteOf, state } = await setup({ remote: { a: 'ra', b: 'rb' }, local: { a: 'la', b: 'lb' } });
+    const plans = await engine.plan([profile('a'), profile('b')]);
+    const realTx = pg.sql.transaction;
+    pg.sql.transaction = async (queries: unknown[]) => {
+        const result = await realTx(queries);
+        fs.chmodSync(path.join(dir, 'a.json'), 0o000);
+        return result;
+    };
+
+    let outcomes;
+    try {
+        outcomes = await engine.apply(plans.map((plan, i) => ({ plan, direction: 'upload' as const, candidate: `edited-${'ab'[i]}` })));
+    } finally {
+        fs.chmodSync(path.join(dir, 'a.json'), 0o644);
+    }
+
+    assert.deepEqual(outcomes.map((o) => o.kind), ['local-write-failed', 'ok']);
+    assert.ok(outcomes[0].kind === 'local-write-failed' && outcomes[0].remoteCommitted);
+    assert.deepEqual([await remoteOf('a'), await remoteOf('b')], ['edited-a', 'edited-b']);
+    assert.equal(localOf('b'), 'edited-b');
+    assert.ok(state.get(engine.keyFor(profile('b'))));
+});

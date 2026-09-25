@@ -26,7 +26,7 @@ async function setup(rows: Array<{
     localMtime: Date;
     remote: string;
     remoteTime: Date;
-}>) {
+}>, extraSelected: Profile[] = []) {
     const { vscode, neon } = resetMocks();
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-multi-'));
     vscode.workspace.workspaceFolders = [{ uri: { fsPath: workspace } }];
@@ -44,7 +44,7 @@ async function setup(rows: Array<{
         }
     } as never);
     await ConfigManager.setConnectionString('postgres://example');
-    await ConfigManager.saveProfiles(rows.map((r) => r.profile));
+    await ConfigManager.saveProfiles([...rows.map((r) => r.profile), ...extraSelected]);
 
     for (const r of rows) {
         const file = path.join(workspace, r.profile.filePath);
@@ -67,7 +67,7 @@ async function setup(rows: Array<{
     };
     neon.nextSql = sql;
 
-    await MultiSyncManager.start(rows.map((r) => r.profile.name));
+    await MultiSyncManager.start([...rows.map((r) => r.profile.name), ...extraSelected.map((p) => p.name)]);
 
     const internals = MultiSyncManager as unknown as Internals;
     const writes = () => sql.queryCalls.filter((c) => /WITH w AS/.test(c.query)).map((c) => c.params);
@@ -351,4 +351,37 @@ test('a stale batch names the rows that were not applied because of it', async (
     await internals.handleMessage({ type: 'confirmAll' });
 
     assert.match(vscode.window.errorMessages.at(-1)!, /failed: s1 \(remote changed since loaded\)\. Not applied \(the batch is all-or-nothing\): s2\./);
+});
+
+test('the panel refuses to open while a diff from a previous panel is still open', async () => {
+    const p = profile('old-diff');
+    const { internals, vscode } = await setup([{ profile: p, local: 'l', localMtime: NEW, remote: 'r', remoteTime: OLD }]);
+    let release!: (r: DiffResult) => void;
+    stubExternalDiff(() => new Promise<DiffResult>((resolve) => { release = resolve; }));
+    const diffDone = internals.handleMessage({ type: 'diff', profile: 'old-diff' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const { SyncManager } = require('../src/sync') as typeof import('../src/sync');
+    (SyncManager as unknown as { currentSession: unknown }).currentSession = {}; // the stubbed diff stands in for a real session
+    const { MultiSyncManager } = require('../src/multiSync') as typeof import('../src/multiSync');
+    (MultiSyncManager as unknown as { panel: unknown }).panel = null; // user closed the panel
+
+    await MultiSyncManager.start([p.name]);
+
+    assert.match(vscode.window.warningMessages.at(-1)!, /Finish or cancel the open sync diff first/);
+    (SyncManager as unknown as { currentSession: unknown }).currentSession = null;
+    release({ outcome: 'cancelled', candidateContent: '', direction: 'upload' });
+    await diffDone;
+});
+
+test('profiles sharing a local file are skipped; the others still load', async () => {
+    const clean = profile('clean');
+    const twinA = profile('twinA', { filePath: 'shared.json' });
+    const twinB = profile('twinB', { filePath: 'shared.json' });
+    const { vscode, internals } = await setup(
+        [{ profile: clean, local: 'l', localMtime: NEW, remote: 'r', remoteTime: OLD }],
+        [twinA, twinB]
+    );
+
+    assert.deepEqual(internals.items.map((i) => i.plan.profile.name), ['clean']);
+    assert.match(vscode.window.warningMessages.join('\n'), /Skipped twinA, twinB: Profiles "twinA" \(shared\.json\) and "twinB" \(shared\.json\) use the same local file/);
 });

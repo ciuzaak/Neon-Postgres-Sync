@@ -36,6 +36,11 @@ export class SyncManager {
     private static currentSession: SyncSession | null = null;
     private static isSwapping = false;
 
+    /** A diff session (single sync, or one opened from the multi-profile panel) is open. */
+    static hasActiveSession(): boolean {
+        return this.currentSession !== null;
+    }
+
     /**
      * Register a listener to detect when the diff editor is closed,
      * so we can cleanup temp files even if user doesn't click confirm/cancel.
