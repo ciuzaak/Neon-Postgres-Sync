@@ -217,6 +217,15 @@ export function activate(context: vscode.ExtensionContext) {
         await SyncManager.startSync(selected.sortKey);
     });
 
+    // Internal (not contributed): the "Re-sync" button on stale-sync toasts.
+    const resyncDisposable = vscode.commands.registerCommand('neonSync.resyncProfile', async (name: string) => {
+        if (MultiSyncManager.isActive()) {
+            vscode.window.showInformationMessage('A multi-profile sync panel is already open.');
+            return;
+        }
+        await SyncManager.startSync(name);
+    });
+
     const swapDirectionDisposable = vscode.commands.registerCommand('neonSync.swapSyncDirection', async () => {
         await SyncManager.swapSyncDirection();
     });
@@ -246,6 +255,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(syncDisposable);
+    context.subscriptions.push(resyncDisposable);
     context.subscriptions.push(swapDirectionDisposable);
     context.subscriptions.push(confirmSyncDisposable);
     context.subscriptions.push(cancelSyncDisposable);

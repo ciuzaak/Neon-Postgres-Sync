@@ -244,3 +244,57 @@ test('non-stale database errors are thrown with nothing written', async () => {
     await assert.rejects(engine.apply([{ plan, direction: 'upload', candidate: 'x' }]), /gone|records/);
     assert.equal(localOf('a'), 'l');
 });
+
+// ── review round 1 regressions ─────────────────────────────────────────
+
+test('a local file saved while the remote write is in flight is not overwritten (download and upload rows)', async () => {
+    const { engine, pg, dir, localOf, remoteOf } = await setup({
+        remote: { a: 'ra', b: 'rb' },
+        local: { a: 'la', b: 'lb' }
+    });
+    const plans = await engine.plan([profile('a'), profile('b')]);
+    const realTx = pg.sql.transaction;
+    pg.sql.transaction = async (queries: unknown[]) => {
+        const result = await realTx(queries);
+        // The user saves both files while the batch is on the wire.
+        fs.writeFileSync(path.join(dir, 'a.json'), 'saved-a');
+        fs.writeFileSync(path.join(dir, 'b.json'), 'saved-b');
+        return result;
+    };
+
+    const outcomes = await engine.apply([
+        { plan: plans[0], direction: 'upload', candidate: 'edited-a' },          // local rewrite needed
+        { plan: plans[1], direction: 'download', candidate: plans[1].remoteContent }
+    ]);
+
+    assert.deepEqual(outcomes.map((o) => [o.kind, o.kind === 'stale-local' && o.remoteCommitted]), [
+        ['stale-local', true],
+        ['stale-local', false]
+    ]);
+    assert.equal(localOf('a'), 'saved-a');
+    assert.equal(localOf('b'), 'saved-b');
+    assert.equal(await remoteOf('a'), 'edited-a');
+});
+
+test('two requests for the same local file are refused before anything is written', async () => {
+    const { engine, remoteOf } = await setup({ remote: { a: 'ra', b: 'rb' }, local: { shared: 'l' } });
+    const a = profile('a', { filePath: 'shared.json' });
+    const b = profile('b', { filePath: 'shared.json' });
+    const plans = await engine.plan([a, b]);
+
+    await assert.rejects(
+        engine.apply(plans.map((plan) => ({ plan, direction: 'upload' as const, candidate: 'x' }))),
+        /Profiles "a" and "b" use the same local file/
+    );
+    assert.deepEqual([await remoteOf('a'), await remoteOf('b')], ['ra', 'rb']);
+});
+
+test('uploading an empty file to a missing row creates the row', async () => {
+    const { engine, remoteOf } = await setup({ local: { a: '' } });
+    const [plan] = await engine.plan([profile('a')]);
+
+    const [outcome] = await engine.apply([{ plan, direction: 'upload', candidate: plan.localContent }]);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.equal(await remoteOf('a'), '');
+});

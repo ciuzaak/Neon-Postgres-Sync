@@ -76,6 +76,10 @@ export class SyncManager {
     }
 
     static async startSync(profileName: string) {
+        if (this.currentSession) {
+            vscode.window.showWarningMessage('Finish or cancel the open sync diff first.');
+            return;
+        }
         const profile = ConfigManager.getProfile(profileName);
         if (!profile) {
             vscode.window.showErrorMessage(`Profile "${profileName}" not found.`);
@@ -86,7 +90,7 @@ export class SyncManager {
             { location: vscode.ProgressLocation.Notification, title: `Syncing ${profile.name}...` },
             async () => {
                 try {
-                    const [plan] = await (await createSyncEngine()).plan([profile]);
+                    const [plan] = await (await createSyncEngine([profile])).plan([profile]);
 
                     switch (plan.status) {
                         case 'parse-error':
@@ -353,7 +357,7 @@ export class SyncManager {
             } else if (!session.plan) {
                 vscode.window.showErrorMessage('Error confirming sync: missing sync plan.');
             } else {
-                const [outcome] = await (await createSyncEngine()).apply([
+                const [outcome] = await (await createSyncEngine([session.plan.profile])).apply([
                     { plan: session.plan, direction: session.direction, candidate: candidateContent }
                 ]);
                 this.reportOutcome(outcome);
@@ -415,9 +419,11 @@ export class SyncManager {
 
     private static reportOutcome(outcome: ApplyOutcome): void {
         const { profile } = outcome.request.plan;
+        // The toast can be clicked long after this sync ended, so go through
+        // the command, which applies the same guards as "Sync File".
         const resync = (message: string) => {
             void vscode.window.showErrorMessage(message, 'Re-sync').then((choice) => {
-                if (choice === 'Re-sync') void this.startSync(profile.name);
+                if (choice === 'Re-sync') void vscode.commands.executeCommand('neonSync.resyncProfile', profile.name);
             });
         };
         switch (outcome.kind) {
@@ -435,7 +441,9 @@ export class SyncManager {
                 resync(`Remote record for "${profile.name}" changed since this diff was opened (another machine synced?). Nothing was written.`);
                 return;
             case 'stale-local':
-                resync(`Local file for "${profile.name}" changed since this diff was opened. Nothing was written.`);
+                resync(outcome.remoteCommitted
+                    ? `Uploaded ${profile.name}, but its local file changed meanwhile and was not overwritten.`
+                    : `Local file for "${profile.name}" changed since this diff was opened. Nothing was written.`);
                 return;
             case 'merge-error':
                 vscode.window.showErrorMessage(`Cannot apply sync for "${profile.name}": ${outcome.error.message}`);

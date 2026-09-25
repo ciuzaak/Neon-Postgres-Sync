@@ -224,12 +224,15 @@ type ApplyOutcome =
 
 `apply` pipeline:
 1. **Merge per side.** Remote bytes = `mergeBack(candidate, remoteOriginal)`, local bytes = `mergeBack(candidate, localOriginal)` — each side keeps its own excluded values. (v0.7 wrote the remote-merged bytes to *both* sides, so an upload replaced this machine's excluded values with the remote's — the opposite of what `excludeKeys` is for.) A merge error fails only that request.
-2. **Local guard.** Re-read each file; if it no longer matches the plan (content, or existence), that request is `stale-local` and never reaches the DB.
-3. **One atomic conditional batch** for uploads whose remote bytes actually change. On `StaleRemoteError`, nothing is written anywhere: stale rows are `stale-remote`, the rest `not-applied`. Other DB errors are thrown (nothing written).
-4. **Local writes**, skipped when the bytes are unchanged (no needless mtime bump). A failed write after a remote commit returns `retryPlan` — the plan with the committed remote as its new original and version — so retrying the same candidate skips the DB, while a re-edited candidate is written conditionally on the committed version.
+0. **Shared files refused.** Two requests resolving to the same file (symlinks followed; case-folded on macOS/Windows) throw before anything happens — they would corrupt each other's baselines. Hosts additionally refuse to sync a profile that shares its file with *any* configured profile, since separate syncs corrupt baselines just the same.
+2. **Local guard.** Re-read each file; if it no longer matches the plan (content, or existence), that request is `stale-local` and never reaches the DB. It is checked **again right before each local write**, because the remote round trip leaves time for a save; a file changed then is not written (`stale-local` with `remoteCommitted` for an upload whose remote already went through — both sides now differ from the baseline, so the next sync asks).
+3. **One atomic conditional batch** for uploads whose remote bytes actually change (or whose row doesn't exist yet). On `StaleRemoteError`, nothing is written anywhere: stale rows are `stale-remote`, the rest `not-applied`. Other DB errors are thrown (nothing written).
+4. **Local writes**, skipped when the bytes are unchanged (no needless mtime bump), and **atomic** (temp file + rename): a failure midway (disk full, size limit, crash) leaves the old file, never a fragment the next plan would read as a local edit and upload. Symlinks are followed (dotfile managers), permission bits kept, read-only files refused. A failed write after a remote commit returns `retryPlan` — the plan with the committed remote as its new original and version — so retrying the same candidate skips the DB, while a re-edited candidate is written conditionally on the committed version.
 5. **Baselines** for every fully successful request, from the stored content the write returned (Part 2).
 
 `plan()` refreshes the baseline of `identical` plans, unless a baseline stamped after the plan started already exists (another window synced meanwhile).
+
+Known limitation: with a `jsonb` data column the stored text is canonicalized, so after an upload the local file never compares identical and each sync re-proposes the (idempotent) upload; a genuine remote change then shows as a conflict. No data is lost; `TEXT` is the supported type.
 
 Host wiring: `src/hostEngine.ts` builds the engine from the configured connection and `globalStorage/sync-state`. The legacy unconditional `upsert` paths are gone.
 

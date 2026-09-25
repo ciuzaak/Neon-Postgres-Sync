@@ -1,8 +1,5 @@
 import { ConfigManager } from './config';
-import { RecordStore, assertValidTableName } from './core/db';
-import type { FetchedRecord, Profile } from './core/types';
-
-export type { FetchedRecord } from './core/types';
+import { RecordStore } from './core/db';
 
 /**
  * VS Code adapter over `core/db`'s RecordStore: resolves the connection string
@@ -48,30 +45,5 @@ export class DatabaseService {
             this.storeCache.clear();
         });
         this.isConnectionStringListenerRegistered = true;
-    }
-
-    static async fetchRecordWithMeta(profile: Profile): Promise<FetchedRecord> {
-        // Validate before resolving the connection string so a bad profile
-        // fails fast instead of triggering the missing-URL prompt.
-        assertValidTableName(profile.tableName);
-        try {
-            return await (await this.getRecordStore()).fetch(profile);
-        } catch (error) {
-            console.error('Error fetching record with meta:', error);
-            throw error;
-        }
-    }
-
-    static async fetchRecordsWithMeta(profiles: Profile[]): Promise<FetchedRecord[]> {
-        if (profiles.length === 0) {
-            return [];
-        }
-        profiles.forEach((p) => assertValidTableName(p.tableName));
-        try {
-            return await (await this.getRecordStore()).fetchMany(profiles);
-        } catch (error) {
-            console.error('Error fetching records batch:', error);
-            throw error;
-        }
     }
 }

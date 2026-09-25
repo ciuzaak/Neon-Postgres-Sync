@@ -79,7 +79,7 @@ export class MultiSyncManager {
             },
             async () => {
                 try {
-                    return await (await createSyncEngine()).plan(profiles);
+                    return await (await createSyncEngine(profiles)).plan(profiles);
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Error loading profiles: ${error.message}`);
                     return null;
@@ -268,6 +268,7 @@ export class MultiSyncManager {
             if (result.outcome === 'confirmed') {
                 item.direction = result.direction;
                 item.conflict = false;
+                this.refreshStats(item);
                 // The diff returned the stripped, possibly user-edited candidate;
                 // the engine merges each side's excluded keys back in.
                 await this.applyItems([{ item, candidate: result.candidateContent }]);
@@ -324,7 +325,7 @@ export class MultiSyncManager {
 
         let outcomes: ApplyOutcome[];
         try {
-            outcomes = await (await createSyncEngine()).apply(requests);
+            outcomes = await (await createSyncEngine(requests.map((r) => r.plan.profile))).apply(requests);
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to commit uploads: ${error.message}. No changes were applied.`);
             return;
@@ -332,6 +333,7 @@ export class MultiSyncManager {
 
         const succeeded: string[] = [];
         const problems: string[] = [];
+        const notApplied: string[] = [];
         let stale = false;
         outcomes.forEach((outcome, idx) => {
             const { item } = batch[idx];
@@ -359,17 +361,21 @@ export class MultiSyncManager {
                     break;
                 case 'stale-local':
                     stale = true;
-                    problems.push(`${name} (local file changed since loaded)`);
+                    problems.push(outcome.remoteCommitted
+                        ? `${name} (remote saved, but the local file changed meanwhile and was not overwritten)`
+                        : `${name} (local file changed since loaded)`);
                     break;
                 case 'not-applied':
+                    notApplied.push(name);
                     break;
             }
         });
 
         const skippedNote = skipped > 0 ? ` ${skipped} skipped (conflict or parse error — resolve them per row).` : '';
+        const panelOpen = this.panel !== null;
         if (problems.length === 0) {
             if (succeeded.length > 0) {
-                const allDone = this.items.length === 0 ? ' All profiles synced.' : '';
+                const allDone = panelOpen && this.items.length === 0 ? ' All profiles synced.' : '';
                 vscode.window.showInformationMessage(
                     `Synced ${succeeded.length === 1 ? succeeded[0] : `${succeeded.length} profiles`}.${allDone}${skippedNote}`
                 );
@@ -380,8 +386,11 @@ export class MultiSyncManager {
         const committedNote = this.items.some((i) => i.remoteCommitted)
             ? ' Remote side for rows marked "remote committed" is already saved; retry only rewrites the local files.'
             : '';
-        const message = `Synced ${succeeded.length}; failed: ${problems.join(', ')}.${committedNote}${skippedNote}`;
-        if (!stale) {
+        const notAppliedNote = notApplied.length > 0
+            ? ` Not applied (the batch is all-or-nothing): ${notApplied.join(', ')}.`
+            : '';
+        const message = `Synced ${succeeded.length}; failed: ${problems.join(', ')}.${notAppliedNote}${committedNote}${skippedNote}`;
+        if (!stale || !panelOpen) {
             vscode.window.showErrorMessage(message);
             return;
         }
@@ -392,6 +401,11 @@ export class MultiSyncManager {
 
     /** Re-plan the rows still on the panel from fresh data. */
     private static async reload(): Promise<void> {
+        if (!this.panel) return;
+        if (this.activeDiffProfile) {
+            vscode.window.showWarningMessage('Close the open diff before reloading.');
+            return;
+        }
         const names = this.items.map((i) => i.plan.profile.name);
         this.panel?.dispose();
         this.panel = null;

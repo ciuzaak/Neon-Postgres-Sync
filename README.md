@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS json_records (
 );
 ```
 
-**Note**: The `data` column must be of type `TEXT` to support raw content sync.
+**Note**: The `data` column must be of type `TEXT` to support raw content sync. (`json` columns keep text verbatim but reject comments; `jsonb` rewrites content into Postgres's canonical form, so a file uploaded there never compares identical to the stored row afterwards.)
+
+Each profile needs its own local file — two profiles pointing at the same file are refused at sync time.
 
 ### 2. Connection String and Profiles
 

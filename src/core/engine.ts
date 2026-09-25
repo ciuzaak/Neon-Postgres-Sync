@@ -1,7 +1,6 @@
-import * as fs from 'fs';
 import { RecordStore, StaleRemoteError, WrittenRecord } from './db';
 import { JsoncFilterMergeError, stripKeys } from './jsoncFilter';
-import { readLocalFile } from './localFile';
+import { readLocalFile, samePathKey, writeFileAtomic } from './localFile';
 import { baselineAfterSync, finalizeCandidate, planSync, SyncPlan } from './plan';
 import { SyncStateKey, SyncStateStore } from './syncState';
 import type { Profile, SyncDirection } from './types';
@@ -30,8 +29,14 @@ export type ApplyOutcome =
     | { kind: 'ok'; request: ApplyRequest; remoteVersion: string | null; baselineError?: string }
     /** The remote row changed since `plan` was fetched. Nothing written for this request. */
     | { kind: 'stale-remote'; request: ApplyRequest }
-    /** The local file changed since `plan` was read. Nothing written for this request. */
-    | { kind: 'stale-local'; request: ApplyRequest }
+    /**
+     * The local file changed since `plan` was read, so it was not written.
+     * Usually caught before anything is written; if it changed while the
+     * remote write was in flight, `remoteCommitted` says the remote already
+     * holds the reviewed content (re-plan: both sides now differ from the
+     * baseline, so the next sync asks).
+     */
+    | { kind: 'stale-local'; request: ApplyRequest; remoteCommitted: boolean }
     /** Another request in the same atomic batch was stale, so this one was not written either. */
     | { kind: 'not-applied'; request: ApplyRequest }
     /** excludeKeys could not be merged back into the candidate. Nothing written. */
@@ -53,6 +58,27 @@ interface Prepared {
     /** What the row holds after this apply, as read back (set once written). */
     remoteStored?: string;
     remoteVersion: string | null;
+}
+
+/**
+ * Profiles (among `profiles`) whose local files are the same file as
+ * another's. Two profiles sharing a file corrupt each other's baselines —
+ * syncing one then makes the other's next plan a confident wrong-way upload —
+ * so hosts refuse to sync them.
+ */
+export function profilesSharingLocalFiles(
+    profiles: Profile[],
+    resolvePath: (filePath: string) => string
+): Array<[Profile, Profile]> {
+    const seen = new Map<string, Profile>();
+    const clashes: Array<[Profile, Profile]> = [];
+    for (const profile of profiles) {
+        const key = samePathKey(resolvePath(profile.filePath));
+        const first = seen.get(key);
+        if (first) clashes.push([first, profile]);
+        else seen.set(key, profile);
+    }
+    return clashes;
 }
 
 /**
@@ -107,6 +133,10 @@ export class SyncEngine {
      * Non-stale database errors are thrown: nothing has been written then.
      */
     async apply(requests: ApplyRequest[]): Promise<ApplyOutcome[]> {
+        const [clash] = profilesSharingLocalFiles(requests.map((r) => r.plan.profile), this.deps.resolvePath);
+        if (clash) {
+            throw new Error(`Profiles "${clash[0].name}" and "${clash[1].name}" use the same local file; sync them separately.`);
+        }
         const outcomes = new Map<ApplyRequest, ApplyOutcome>();
         const prepared: Prepared[] = [];
 
@@ -128,11 +158,15 @@ export class SyncEngine {
 
         const guarded = prepared.filter((p) => {
             if (this.localUnchanged(p)) return true;
-            outcomes.set(p.request, { kind: 'stale-local', request: p.request });
+            outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted: false });
             return false;
         });
 
-        const uploads = guarded.filter((p) => p.remoteBytes !== undefined && p.remoteBytes !== p.request.plan.remoteOriginal);
+        // Skip the DB only when the row exists and already holds these bytes
+        // (e.g. a retry after the remote committed); an absent row must be created.
+        const uploads = guarded.filter((p) =>
+            p.remoteBytes !== undefined
+            && !(p.request.plan.remoteExists && p.remoteBytes === p.request.plan.remoteOriginal));
         if (uploads.length > 0) {
             let written: WrittenRecord[];
             try {
@@ -161,12 +195,17 @@ export class SyncEngine {
             const { plan } = p.request;
             // Baselines come from what the row holds (canonicalized for jsonb), not the bytes sent.
             const remoteAfter = p.remoteStored ?? plan.remoteOriginal;
+            const remoteCommitted = p.remoteStored !== undefined;
+            // Check again: the remote round trip above leaves time for a save.
+            if (!this.localUnchanged(p)) {
+                outcomes.set(p.request, { kind: 'stale-local', request: p.request, remoteCommitted });
+                continue;
+            }
             try {
                 if (!(plan.localExists && p.localBytes === plan.localOriginal)) {
-                    fs.writeFileSync(p.localPath, p.localBytes);
+                    writeFileAtomic(p.localPath, p.localBytes);
                 }
             } catch (e) {
-                const remoteCommitted = p.remoteStored !== undefined;
                 outcomes.set(p.request, {
                     kind: 'local-write-failed',
                     request: p.request,

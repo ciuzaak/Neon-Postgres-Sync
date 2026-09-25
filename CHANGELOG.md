@@ -7,7 +7,8 @@ All notable changes to the "neon-postgres-sync" extension will be documented in 
 - **Change Detection by Sync History**: Each machine records what both sides looked like after its last sync of a profile. The next sync compares each side against that record instead of against the other side's clock: only local changed → upload, only remote changed → download, both changed → an explicit conflict prompt. Profiles with no history yet fall back to the timestamp rule.
 - **Conflict Rows (Multi-Sync)**: Rows where both sides changed get a `⚠ conflict` badge and are left out of `Confirm All` until handled individually.
 - **Safe Uploads**: Uploads are conditional on the remote still holding exactly what was reviewed. If another machine synced (or someone edited the row in the Neon console) in the meantime, nothing is written and a `Re-sync` / `Reload` is offered. A batch with any stale row writes nothing.
-- **Local File Guard**: A local file edited after the diff or batch page loaded is not overwritten.
+- **Local File Guard**: A local file edited after the diff or batch page loaded is not overwritten — checked again right before writing. Local writes are atomic (a failure midway can no longer leave a truncated file), follow symlinks instead of replacing them, and keep the file's permissions.
+- **Shared-File Check**: Profiles that point at the same local file are refused at sync time; they would corrupt each other's sync history.
 
 ### Fixed
 - **Upload Overwrote This Machine's Filtered Keys**: With `excludeKeys`, uploading also wrote the *remote's* values for the filtered keys into the local file, so e.g. a machine-specific theme was replaced on every upload. Each side now keeps its own values.

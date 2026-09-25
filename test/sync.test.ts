@@ -132,3 +132,55 @@ test('single sync: only the remote changed since the last sync ⇒ download with
 
     assert.equal(fs.readFileSync(file, 'utf-8'), 'theirs');
 });
+
+test('single sync: swapping direction in the diff carries the plan through to confirm', async () => {
+    const p = single();
+    const { SyncManager, file, remoteOf } = await setupSingle(p, 'mine', 'theirs', { localNewer: true });
+
+    await SyncManager.startSync(p.name); // upload suggested
+    await SyncManager.swapSyncDirection();
+    await SyncManager.confirmSync();
+
+    assert.equal(fs.readFileSync(file, 'utf-8'), 'theirs');
+    assert.equal(await remoteOf(), 'theirs');
+});
+
+test('single sync: a local file changed after the diff opened is not overwritten; Re-sync goes through the guarded command', async () => {
+    const p = single();
+    const { vscode, SyncManager, file, remoteOf } = await setupSingle(p, 'mine', 'theirs', { localNewer: true });
+
+    await SyncManager.startSync(p.name);
+    fs.writeFileSync(file, 'edited elsewhere');
+    await SyncManager.confirmSync(); // mock toast auto-picks "Re-sync"
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(fs.readFileSync(file, 'utf-8'), 'edited elsewhere');
+    assert.equal(await remoteOf(), 'theirs');
+    assert.match(vscode.window.errorMessages.at(-1)!, /^Local file for "solo" changed since this diff was opened/);
+    assert.deepEqual(
+        vscode.commands.executed.filter((c) => c.command === 'neonSync.resyncProfile').map((c) => c.args),
+        [['solo']]
+    );
+});
+
+test('single sync: startSync refuses while another sync diff is open', async () => {
+    const p = single();
+    const { vscode, SyncManager } = await setupSingle(p, 'mine', 'theirs', { localNewer: true });
+
+    await SyncManager.startSync(p.name);
+    await SyncManager.startSync(p.name);
+
+    assert.match(vscode.window.warningMessages.at(-1)!, /Finish or cancel the open sync diff first/);
+    await SyncManager.cancelSync();
+});
+
+test('single sync: a profile sharing its local file with another configured profile is refused', async () => {
+    const p = single();
+    const { vscode, SyncManager, ConfigManager, file } = await setupSingle(p, 'mine', 'theirs', { localNewer: true });
+    await ConfigManager.saveProfiles([p, single({ name: 'twin', id: 'twin-id' })]);
+
+    await SyncManager.startSync(p.name);
+
+    assert.match(vscode.window.errorMessages.at(-1)!, /Profiles "solo" and "twin" use the same local file \(solo\.json\)/);
+    assert.equal(fs.readFileSync(file, 'utf-8'), 'mine');
+});
