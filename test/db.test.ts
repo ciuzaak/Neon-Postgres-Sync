@@ -97,7 +97,7 @@ test('fetchRecordWithMeta queries by id and parses object data and string update
 
     assert.equal(neon.calls[0], 'postgres://example');
     assert.equal(sql.queryCalls.length, 1);
-    assert.match(sql.queryCalls[0].query, /SELECT data, update_time, encode\(sha256\(convert_to\(data::text, current_setting\('server_encoding'\)\)\), 'hex'\) AS version FROM public\.records WHERE id = \$1/);
+    assert.match(sql.queryCalls[0].query, /SELECT data::text AS data, update_time, encode\(sha256\(convert_to\(data::text, current_setting\('server_encoding'\)\)\), 'hex'\) AS version FROM public\.records WHERE id = \$1/);
     assert.deepEqual(sql.queryCalls[0].params, ['row-1']);
     assert.equal(result.data, '{\n  "ok": true\n}');
     assert.equal(result.updateTime?.toISOString(), '2026-01-02T03:04:05.000Z');

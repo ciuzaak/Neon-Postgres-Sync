@@ -10,6 +10,7 @@ const DATA_COLUMN = 'data';
 const CREATE_TIME_COLUMN = 'create_time';
 const UPDATE_TIME_COLUMN = 'update_time';
 const VERSION_ALIAS = 'version';
+const STORED_ALIAS = 'stored';
 // Content-derived version token, computed server-side. Deliberately NOT based
 // on update_time: its ::text form depends on the column's precision (two
 // writes in one second collide under timestamp(0)) and, for timestamptz, on
@@ -111,8 +112,14 @@ function parseFetchedRow(row: QueryRow | undefined): FetchedRecord {
     return { data, updateTime, version };
 }
 
+/**
+ * `data::text` so the driver hands back the column's text verbatim for text
+ * and json columns (it would otherwise parse json/jsonb, and re-serializing
+ * rewrites the user's content: `1.0` → `1`, key order, formatting). jsonb
+ * has no verbatim text; `::text` is its canonical form.
+ */
 function selectQuery(tableName: string): string {
-    return `SELECT ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
+    return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
 }
 
 function upsertQuery(tableName: string): string {
@@ -142,14 +149,14 @@ function conditionalWriteQuery(tableName: string, expectExists: boolean): string
         ? `UPDATE ${tableName}
                SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
                WHERE ${ID_COLUMN} = $1 AND ${VERSION_EXPR} IS NOT DISTINCT FROM $3
-               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}`
+               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`
         : `INSERT INTO ${tableName} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
                VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                ON CONFLICT (${ID_COLUMN}) DO NOTHING
-               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}`;
+               RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`;
     return `
         WITH w AS (${write})
-        SELECT max(${VERSION_ALIAS}) AS ${VERSION_ALIAS}, 1 / count(*)::int AS cas_ok FROM w
+        SELECT max(${VERSION_ALIAS}) AS ${VERSION_ALIAS}, max(${STORED_ALIAS}) AS ${STORED_ALIAS}, 1 / count(*)::int AS cas_ok FROM w
     `;
 }
 
@@ -157,12 +164,25 @@ function conditionalWriteParams(profile: Profile, data: string, expected: Remote
     return expected.exists ? [profile.id, data, expected.version] : [profile.id, data];
 }
 
-function parseWrittenVersion(result: unknown): string {
-    const version = parseQueryRows(result)[0]?.[VERSION_ALIAS];
-    if (typeof version !== 'string') {
+/** What a conditional write left in the row. */
+export interface WrittenRecord {
+    version: string;
+    /**
+     * The row's content as stored, read back as `data::text` — identical to
+     * what was sent for text/json columns, canonicalized for jsonb. Record
+     * baselines from this, not from the bytes sent, so they match the next fetch.
+     */
+    data: string;
+}
+
+function parseWritten(result: unknown): WrittenRecord {
+    const row = parseQueryRows(result)[0];
+    const version = row?.[VERSION_ALIAS];
+    const data = row?.[STORED_ALIAS];
+    if (typeof version !== 'string' || typeof data !== 'string') {
         throw new Error('Unexpected conditional write response from HTTP transport.');
     }
-    return version;
+    return { version, data };
 }
 
 /**
@@ -243,21 +263,22 @@ export class RecordStore {
 
     /**
      * Write `data` only if the remote row still matches `expected`. Returns
-     * the row's new version. Throws StaleRemoteError (nothing written) otherwise.
+     * the row's new version and stored content. Throws StaleRemoteError
+     * (nothing written) otherwise.
      */
-    async conditionalWrite(profile: Profile, data: string, expected: RemoteExpectation): Promise<string> {
-        const [version] = await this.conditionalWriteMany([{ profile, data, expected }]);
-        return version;
+    async conditionalWrite(profile: Profile, data: string, expected: RemoteExpectation): Promise<WrittenRecord> {
+        const [written] = await this.conditionalWriteMany([{ profile, data, expected }]);
+        return written;
     }
 
     /**
      * Conditional writes for many profiles in one atomic HTTP transaction:
      * if any row is stale, none are committed and StaleRemoteError names the
-     * stale rows. Returns new versions aligned with the input order.
+     * stale rows. Returns what each row now holds, aligned with the input order.
      */
     async conditionalWriteMany(
         items: Array<{ profile: Profile; data: string; expected: RemoteExpectation }>
-    ): Promise<string[]> {
+    ): Promise<WrittenRecord[]> {
         if (items.length === 0) {
             return [];
         }
@@ -284,7 +305,7 @@ export class RecordStore {
         // cause fails again and is rethrown as-is, not relabeled stale.
         for (let tries = 1; ; tries++) {
             try {
-                return (await attempt()).map(parseWrittenVersion);
+                return (await attempt()).map(parseWritten);
             } catch (error) {
                 if (!isStaleSentinel(error)) throw error;
                 const stale = await this.findStale(items);

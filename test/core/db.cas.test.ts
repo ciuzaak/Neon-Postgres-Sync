@@ -49,10 +49,11 @@ test('conditionalWrite updates when the version still matches and returns the ne
     const { store, dataOf, expectationOf } = await setup([['a', 'A0', OLD]]);
     const before = await store.fetch(profile('a'));
 
-    const version = await store.conditionalWrite(profile('a'), 'A1', expectationOf(before));
+    const { version, data } = await store.conditionalWrite(profile('a'), 'A1', expectationOf(before));
 
     assert.equal(await dataOf('a'), 'A1');
     assert.equal(version, sha256('A1'));
+    assert.equal(data, 'A1', 'returns the stored content');
     assert.equal((await store.fetch(profile('a'))).version, version, 'returned version round-trips through fetch');
 });
 
@@ -72,7 +73,7 @@ test('conditionalWrite chains: a second write must use the version returned by t
     const { store, StaleRemoteError, expectationOf } = await setup([['a', 'A0', OLD]]);
     const first = expectationOf(await store.fetch(profile('a')));
 
-    const v1 = await store.conditionalWrite(profile('a'), 'A1', first);
+    const { version: v1 } = await store.conditionalWrite(profile('a'), 'A1', first);
 
     await assert.rejects(store.conditionalWrite(profile('a'), 'A2', first), StaleRemoteError);
     await store.conditionalWrite(profile('a'), 'A2', { exists: true, version: v1 });
@@ -81,7 +82,7 @@ test('conditionalWrite chains: a second write must use the version returned by t
 test('conditionalWrite inserts when the row is expected absent and still is', async () => {
     const { store, dataOf } = await setup();
 
-    const version = await store.conditionalWrite(profile('b'), 'B0', { exists: false, version: null });
+    const { version } = await store.conditionalWrite(profile('b'), 'B0', { exists: false, version: null });
 
     assert.equal(await dataOf('b'), 'B0');
     assert.equal(typeof version, 'string');
@@ -179,14 +180,15 @@ test('conditionalWriteMany is atomic: one stale row commits nothing and only it 
 test('conditionalWriteMany returns versions aligned with input order', async () => {
     const { store } = await setup([['a', 'A0', OLD]]);
 
-    const versions = await store.conditionalWriteMany([
+    const written = await store.conditionalWriteMany([
         { profile: profile('new'), data: 'N', expected: { exists: false, version: null } },
         { profile: profile('a'), data: 'A1', expected: { exists: true, version: sha256('A0') } }
     ]);
 
-    assert.equal(versions.length, 2);
-    assert.equal(versions[0], (await store.fetch(profile('new'))).version);
-    assert.equal(versions[1], (await store.fetch(profile('a'))).version);
+    assert.equal(written.length, 2);
+    assert.equal(written[0].version, (await store.fetch(profile('new'))).version);
+    assert.equal(written[1].version, (await store.fetch(profile('a'))).version);
+    assert.deepEqual(written.map((w) => w.data), ['N', 'A1']);
 });
 
 test('conditionalWrite passes through non-stale database errors unchanged', async () => {
@@ -259,7 +261,7 @@ test('a race undone before the re-read (changed then restored) is retried once a
         return realTransaction(queries);
     };
 
-    const version = await store.conditionalWrite(profile('a'), 'A1', before);
+    const { version } = await store.conditionalWrite(profile('a'), 'A1', before);
 
     assert.equal(await dataOf('a'), 'A1');
     assert.equal(version, sha256('A1'));
@@ -271,15 +273,15 @@ test('conditionalWriteMany sends the CAS statement shapes and parameter lists', 
     purgeProjectModules();
     const { RecordStore } = require('../../src/core/db') as typeof import('../../src/core/db');
     const sql = createMockSql();
-    sql.transactionResults.push([[{ version: 'v1' }], [{ version: 'v2' }]]);
+    sql.transactionResults.push([[{ version: 'v1', stored: 'A' }], [{ version: 'v2', stored: 'B' }]]);
     neon.nextSql = sql;
 
-    const versions = await new RecordStore('postgres://x').conditionalWriteMany([
+    const written = await new RecordStore('postgres://x').conditionalWriteMany([
         { profile: profile('a'), data: 'A', expected: { exists: true, version: 'h' } },
         { profile: profile('b', { tableName: 'public.records' }), data: 'B', expected: { exists: false, version: null } }
     ]);
 
-    assert.deepEqual(versions, ['v1', 'v2']);
+    assert.deepEqual(written, [{ version: 'v1', data: 'A' }, { version: 'v2', data: 'B' }]);
     assert.equal(sql.transactionCalls.length, 1);
     const [upd, ins] = sql.queryCalls;
     assert.match(upd.query, /UPDATE records\s+SET data = \$2, update_time = CURRENT_TIMESTAMP\s+WHERE id = \$1 AND encode\(sha256\(convert_to\(data::text, current_setting\('server_encoding'\)\)\), 'hex'\) IS NOT DISTINCT FROM \$3/);
@@ -287,7 +289,8 @@ test('conditionalWriteMany sends the CAS statement shapes and parameter lists', 
     assert.match(ins.query, /INSERT INTO public\.records .*ON CONFLICT \(id\) DO NOTHING/s);
     assert.deepEqual(ins.params, ['b', 'B']);
     for (const q of [upd.query, ins.query]) {
-        assert.match(q, /1 \/ count\(\*\)::int AS cas_ok FROM w/);
+        assert.match(q, /RETURNING .* AS version, data::text AS stored/);
+        assert.match(q, /max\(stored\) AS stored, 1 \/ count\(\*\)::int AS cas_ok FROM w/);
     }
 });
 
@@ -323,4 +326,32 @@ test('StaleRemoteError still surfaces with an empty list when the follow-up read
             return true;
         }
     );
+});
+
+// ── json / jsonb data columns ──────────────────────────────────────────
+
+const JSON_DDL = (type: string) =>
+    `CREATE TABLE records (id TEXT PRIMARY KEY, data ${type}, create_time TIMESTAMP, update_time TIMESTAMP);`;
+
+test('a json column is fetched verbatim, not re-serialized', async () => {
+    const raw = '{"b": 1,   "a": 1.0}';
+    const { store } = await setup([['a', raw, OLD]], JSON_DDL('json'));
+
+    const rec = await store.fetch(profile('a'));
+
+    assert.equal(rec.data, raw);
+    assert.equal(rec.version, sha256(raw));
+});
+
+test('a jsonb column: the write returns the canonical stored text, which is what the next fetch sees', async () => {
+    const { store, expectationOf } = await setup([['a', '{"x": 1}', OLD]], JSON_DDL('jsonb'));
+    const before = await store.fetch(profile('a'));
+
+    const written = await store.conditionalWrite(profile('a'), '{"b": 1,   "a": 1.0}', expectationOf(before));
+    const after = await store.fetch(profile('a'));
+
+    assert.notEqual(written.data, '{"b": 1,   "a": 1.0}', 'jsonb canonicalizes');
+    assert.equal(written.data, after.data);
+    assert.equal(written.version, after.version);
+    await store.conditionalWrite(profile('a'), '{"c": 2}', expectationOf(after));
 });
