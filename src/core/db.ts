@@ -122,15 +122,6 @@ function selectQuery(tableName: string): string {
     return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
 }
 
-function upsertQuery(tableName: string): string {
-    return `
-        INSERT INTO ${tableName} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
-        VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (${ID_COLUMN})
-        DO UPDATE SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
-    `;
-}
-
 /**
  * Compare-and-swap write. The data-modifying CTE affects 0 or 1 rows; the
  * outer aggregate always yields exactly one row, so `1 / count(*)` raises
@@ -235,12 +226,6 @@ export class RecordStore {
         return parseFetchedRow(parseQueryRows(result)[0]);
     }
 
-    /** Unconditional write. Legacy: superseded by `conditionalWrite`; kept until the extension migrates. */
-    async upsert(profile: Profile, data: string): Promise<void> {
-        assertValidTableName(profile.tableName);
-        await this.sql.query(upsertQuery(profile.tableName), [profile.id, data]);
-    }
-
     /**
      * Fetch records for many profiles in a single HTTP round-trip via
      * a non-interactive transaction. Results are returned aligned with
@@ -332,24 +317,5 @@ export class RecordStore {
                 return now.exists !== expected.exists || (expected.exists && now.version !== expected.version);
             })
             .map((i) => i.profile);
-    }
-
-    /**
-     * Update records for many profiles in a single HTTP round-trip via
-     * a non-interactive transaction. Either all writes succeed or none
-     * are committed. Legacy: superseded by `conditionalWriteMany`.
-     */
-    async upsertMany(items: Array<{ profile: Profile; data: string }>): Promise<void> {
-        if (items.length === 0) {
-            return;
-        }
-        for (const { profile } of items) {
-            assertValidTableName(profile.tableName);
-        }
-
-        const sql = this.sql;
-        await sql.transaction(
-            items.map(({ profile, data }) => sql.query(upsertQuery(profile.tableName), [profile.id, data]))
-        );
     }
 }

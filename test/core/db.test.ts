@@ -29,7 +29,10 @@ test('RecordStore rejects unsafe table names before creating a client', async ()
     const store = new RecordStore('postgres://example');
 
     await assert.rejects(store.fetch(profile({ tableName: 'x; drop table y' })), /Invalid table name/);
-    await assert.rejects(store.upsertMany([{ profile: profile({ tableName: 'a.b.c' }), data: '' }]), /Invalid table name/);
+    await assert.rejects(
+        store.conditionalWriteMany([{ profile: profile({ tableName: 'a.b.c' }), data: '', expected: { exists: false, version: null } }]),
+        /Invalid table name/
+    );
     assert.deepEqual(neon.calls, []);
 });
 
@@ -40,7 +43,7 @@ test('RecordStore reuses one client across queries', async () => {
     const store = new RecordStore('postgres://example');
 
     await store.fetch(profile());
-    await store.upsert(profile(), 'x');
+    await store.fetchMany([profile()]);
 
     assert.deepEqual(neon.calls, ['postgres://example']);
     assert.equal(sql.queryCalls.length, 2);

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { CONFIG_FILENAME, ConfigFileReadError, ConfigFileStore } from './core/configFile';
+import { SYNC_STATE_DIRNAME } from './core/syncState';
 import type { ConfigFile, Profile } from './core/types';
 
 export type { ConfigFile, Profile } from './core/types';
@@ -20,6 +21,11 @@ export class ConfigManager {
         if (!fs.existsSync(this.globalStorageUri.fsPath)) {
             fs.mkdirSync(this.globalStorageUri.fsPath, { recursive: true });
         }
+    }
+
+    /** Directory for per-machine sync baselines (see core/syncState). */
+    static getSyncStateDir(): string | undefined {
+        return this.globalStorageUri && path.join(this.globalStorageUri.fsPath, SYNC_STATE_DIRNAME);
     }
 
     private static getStore(): ConfigFileStore | undefined {

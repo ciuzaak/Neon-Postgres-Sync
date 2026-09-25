@@ -1,7 +1,7 @@
 # Host-Agnostic Core + Sync Safety (Baseline & Optimistic Concurrency) — Design
 
 Date: 2026-09-25
-Status: Approved — Part 0 implemented; Parts 1–3 in progress
+Status: Implemented (Parts 0–3)
 
 ## Goal
 
@@ -200,39 +200,50 @@ Symmetric, cheaper: before writing a local file, re-read it and compare to the p
 
 ---
 
-## Part 3 — Core apply API (needed by the CLI; lands with Parts 1–2)
+## Part 3 — Core apply API (implemented)
 
-`multiSync.ts` currently owns the two-phase commit (atomic DB phase, then best-effort local writes, `remotePersisted` retry bookkeeping). Parts 1–2 change that flow anyway (versions, guards, baseline writes), so it moves into core at the same time rather than being extracted twice:
+`multiSync.ts` used to own the two-phase commit (atomic DB phase, then best-effort local writes, `remotePersisted` retry bookkeeping), and `sync.ts` had its own simpler copy. Both now go through `core/engine.ts`:
 
 ```ts
-// core/engine.ts
 class SyncEngine {
-  constructor(deps: { store: RecordStore; state: SyncStateStore; resolvePath: (p: string) => string });
-  plan(profiles: Profile[]): Promise<SyncPlan[]>;                 // fetchMany + readLocalFile + baseline lookup
-  apply(requests: ApplyRequest[]): Promise<ApplyOutcome[]>;      // phase 1 CAS uploads (atomic), phase 2 guarded local writes, phase 3 baselines
+  constructor(deps: { store: RecordStore; state: SyncStateStore; resolvePath(p: string): string; now?(): Date });
+  plan(profiles: Profile[]): Promise<SyncPlan[]>;           // fetchMany + readLocalFile + baseline lookup + planSync
+  apply(requests: ApplyRequest[]): Promise<ApplyOutcome[]>;
 }
 
-interface ApplyRequest { plan: SyncPlan; direction: SyncDirection; finalContent: string; remoteAlreadyCommitted?: boolean }
+interface ApplyRequest { plan: SyncPlan; direction: SyncDirection; candidate: string /* stripped, possibly edited */ }
 
 type ApplyOutcome =
-  | { profile: Profile; kind: 'ok'; version: string | null }
-  | { profile: Profile; kind: 'stale-remote' | 'stale-local' }
-  | { profile: Profile; kind: 'local-write-failed'; remoteCommitted: boolean; error: string };
+  | { kind: 'ok'; remoteVersion; baselineError? }             // baseline failures never fail a sync
+  | { kind: 'stale-remote' }                                  // this row's remote changed
+  | { kind: 'not-applied' }                                   // another row in the atomic batch was stale
+  | { kind: 'stale-local' }                                   // local file changed since planning
+  | { kind: 'merge-error'; error }
+  | { kind: 'local-write-failed'; remoteCommitted; retryPlan };  // (each also carries its request)
 ```
 
-The extension's single and multi flows both call `engine.apply`; the webview keeps only presentation state (`busy`, active diff lock).
+`apply` pipeline:
+1. **Merge per side.** Remote bytes = `mergeBack(candidate, remoteOriginal)`, local bytes = `mergeBack(candidate, localOriginal)` — each side keeps its own excluded values. (v0.7 wrote the remote-merged bytes to *both* sides, so an upload replaced this machine's excluded values with the remote's — the opposite of what `excludeKeys` is for.) A merge error fails only that request.
+2. **Local guard.** Re-read each file; if it no longer matches the plan (content, or existence), that request is `stale-local` and never reaches the DB.
+3. **One atomic conditional batch** for uploads whose remote bytes actually change. On `StaleRemoteError`, nothing is written anywhere: stale rows are `stale-remote`, the rest `not-applied`. Other DB errors are thrown (nothing written).
+4. **Local writes**, skipped when the bytes are unchanged (no needless mtime bump). A failed write after a remote commit returns `retryPlan` — the plan with the committed remote as its new original and version — so retrying the same candidate skips the DB, while a re-edited candidate is written conditionally on the committed version.
+5. **Baselines** for every fully successful request, from the stored content the write returned (Part 2).
 
-**Upload also fixes a v0.7 bug:** today an upload writes the remote-merged bytes (`mergeBack(candidate, remoteOriginal)`) to the *local* file too, so the local machine's own values for excluded keys are replaced by the remote's — the opposite of what excludeKeys is for. `apply` writes each side merged against *its own* original: remote gets `mergeBack(candidate, remoteOriginal)`, local gets `mergeBack(candidate, localOriginal)`. Both have the same projection, so the baseline is unaffected.
+`plan()` refreshes the baseline of `identical` plans, unless a baseline stamped after the plan started already exists (another window synced meanwhile).
 
----
+Host wiring: `src/hostEngine.ts` builds the engine from the configured connection and `globalStorage/sync-state`. The legacy unconditional `upsert` paths are gone.
+
+UX as built:
+- Single sync: `both` uses the direction modal with a conflict message; `stale-remote` / `stale-local` show an error with `Re-sync`.
+- Multi sync: `⚠ conflict` badge; conflict rows are excluded from `Confirm All` (and its count) until the user Swaps, opens the Diff, or Confirms that row. Any stale outcome offers `Reload`, which re-plans the remaining rows from fresh data.
 
 ## Rollout
 
 1. ✅ `version` in fetch + `StaleRemoteError` + CAS statements in `RecordStore` (Part 2). Tests: SQL shape and param order against the mock; semantics against real Postgres via PGlite (`test/core/db.cas.test.ts`).
 2. ✅ `SyncStateStore` + `planSync` baseline input + `change` field + `baselineAfterSync` (Part 1). Pure tests for the decision table and the filter-fingerprint reset.
-3. `SyncEngine.apply` (Part 3); migrate `sync.ts` and `multiSync.ts`; baseline writes per the table above.
-4. UX: conflict badge, stale-remote messages, `Re-sync` / `Reload`.
-5. CHANGELOG + README ("Auto-direction rules" section rewritten around the baseline table).
+3. ✅ `SyncEngine.apply` (Part 3); `sync.ts` and `multiSync.ts` migrated; baseline writes per the table above.
+4. ✅ UX: conflict badge, stale messages, `Re-sync` / `Reload`.
+5. ✅ CHANGELOG + README ("Auto-direction rules" rewritten around the baseline table).
 
 Upgrade path: no baseline exists at first, so behavior is identical to today until each profile's first successful sync (or first `identical` check). No config or schema migration; the table schema is unchanged.
 

@@ -57,6 +57,8 @@ export interface SyncPlan extends MergeContext {
     remoteContent: string;
     localMtime: Date | null;
     remoteUpdateTime: Date | null;
+    /** The fetched remote version token — the expectation for a conditional write. */
+    remoteVersion: string | null;
     status: PlanStatus;
     change: ChangeKind;
     suggestion: DirectionSuggestion;
@@ -147,6 +149,7 @@ export function planSync(
         remoteContent,
         localMtime: local.mtime,
         remoteUpdateTime: remote.updateTime,
+        remoteVersion: remote.version,
         excludeKeys,
         status,
         change,

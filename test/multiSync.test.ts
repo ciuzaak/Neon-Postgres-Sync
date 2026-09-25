@@ -10,14 +10,14 @@ installModuleMocks();
 
 // Characterization tests for the multi-profile panel's persistence paths.
 // They drive MultiSyncManager end-to-end (fetch → plan → confirm) through the
-// module mocks so later refactors of the confirm logic can't drift silently.
+// module mocks so refactors of the confirm logic can't drift silently.
 
 const OLD = new Date('2026-01-01T00:00:00Z');
 const NEW = new Date('2026-01-02T00:00:00Z');
 
 interface Internals {
     handleMessage(msg: unknown): Promise<void>;
-    items: Array<{ profile: Profile; direction: string; remotePersisted: boolean }>;
+    items: Array<{ plan: { profile: Profile }; direction: string; remoteCommitted: boolean; conflict: boolean }>;
 }
 
 async function setup(rows: Array<{
@@ -52,19 +52,27 @@ async function setup(rows: Array<{
         fs.utimesSync(file, r.localMtime, r.localMtime);
     }
 
+    // Fetches return the seeded rows; conditional writes echo what was sent.
     const sql = createMockSql();
-    sql.transactionResults.push(
-        rows.map((r) => [{ data: r.remote, update_time: r.remoteTime.toISOString() }])
-    );
+    sql.transaction = async (queries: unknown[]) => {
+        sql.transactionCalls.push(queries);
+        const calls = sql.queryCalls.slice(-queries.length);
+        return calls.map((c) => {
+            if (/WITH w AS/.test(c.query)) {
+                return [{ version: `v:${c.params[1]}`, stored: c.params[1] }];
+            }
+            const r = rows.find((row) => row.profile.id === c.params[0])!;
+            return [{ data: r.remote, update_time: r.remoteTime.toISOString(), version: `v:${r.remote}` }];
+        });
+    };
     neon.nextSql = sql;
 
     await MultiSyncManager.start(rows.map((r) => r.profile.name));
 
     const internals = MultiSyncManager as unknown as Internals;
-    const upserts = () =>
-        sql.queryCalls.filter((c) => /INSERT INTO/.test(c.query)).map((c) => c.params);
+    const writes = () => sql.queryCalls.filter((c) => /WITH w AS/.test(c.query)).map((c) => c.params);
     const readLocal = (p: Profile) => fs.readFileSync(path.join(workspace, p.filePath), 'utf-8');
-    return { internals, sql, upserts, readLocal, vscode, workspace };
+    return { internals, sql, writes, readLocal, vscode, workspace };
 }
 
 function profile(name: string, overrides: Partial<Profile> = {}): Profile {
@@ -73,7 +81,7 @@ function profile(name: string, overrides: Partial<Profile> = {}): Profile {
 
 test('confirmAll download with excludeKeys keeps local values for excluded keys and writes nothing remote', async () => {
     const p = profile('dl', { excludeKeys: ['theme'] });
-    const { internals, upserts, readLocal } = await setup([{
+    const { internals, writes, readLocal } = await setup([{
         profile: p,
         local: '{"a": 1, "theme": "dark"}',
         localMtime: OLD,
@@ -85,12 +93,12 @@ test('confirmAll download with excludeKeys keeps local values for excluded keys 
     await internals.handleMessage({ type: 'confirmAll' });
 
     assert.deepEqual(JSON.parse(readLocal(p)), { a: 2, theme: 'dark' });
-    assert.deepEqual(upserts(), []);
+    assert.deepEqual(writes(), []);
 });
 
-test('confirmAll upload with excludeKeys keeps remote values for excluded keys and writes the same bytes locally', async () => {
+test('confirmAll upload with excludeKeys: each side keeps its own excluded values', async () => {
     const p = profile('ul', { excludeKeys: ['theme'] });
-    const { internals, sql, upserts, readLocal } = await setup([{
+    const { internals, sql, writes, readLocal } = await setup([{
         profile: p,
         local: '{"a": 1, "theme": "dark"}',
         localMtime: NEW,
@@ -101,47 +109,71 @@ test('confirmAll upload with excludeKeys keeps remote values for excluded keys a
 
     await internals.handleMessage({ type: 'confirmAll' });
 
-    const written = upserts();
+    const written = writes();
     assert.equal(written.length, 1);
     assert.equal(written[0][0], 'ul-id');
-    assert.deepEqual(JSON.parse(written[0][1] as string), { a: 1, theme: 'light' });
-    assert.equal(readLocal(p), written[0][1], 'local mirrors the committed bytes');
+    assert.deepEqual(JSON.parse(written[0][1] as string), { a: 1, theme: 'light' }, 'remote keeps its theme');
+    assert.equal(written[0][2], 'v:{"a": 2, "theme": "light"}', 'conditional on the fetched version');
+    assert.deepEqual(JSON.parse(readLocal(p)), { a: 1, theme: 'dark' }, 'local keeps its theme (v0.7 overwrote it)');
     assert.equal(sql.transactionCalls.length, 2, 'one fetch batch + one atomic write batch');
 });
 
-test('confirmAll retry after a failed local write re-writes locally without re-committing remote', async () => {
-    const p = profile('retry', { excludeKeys: ['theme'] });
-    const { internals, upserts, readLocal, workspace, vscode } = await setup([{
-        profile: p,
-        local: '{"a": 1, "theme": "dark"}',
-        localMtime: NEW,
-        remote: '{"a": 2, "theme": "light"}',
-        remoteTime: OLD
+test('a failed local write keeps the row with its error, and a retry then succeeds', { skip: process.getuid?.() === 0 }, async () => {
+    const p = profile('retry');
+    const { internals, writes, readLocal, workspace, vscode } = await setup([{
+        profile: p, local: 'old', localMtime: OLD, remote: 'new', remoteTime: NEW
     }]);
     const file = path.join(workspace, p.filePath);
     fs.chmodSync(file, 0o444);
-
     try {
         await internals.handleMessage({ type: 'confirmAll' });
     } finally {
         fs.chmodSync(file, 0o644);
     }
-    assert.equal(upserts().length, 1);
     assert.equal(internals.items.length, 1, 'row stays visible');
-    assert.equal(internals.items[0].remotePersisted, true);
-    assert.match(vscode.window.errorMessages.at(-1)!, /already committed/);
+    assert.equal(internals.items[0].remoteCommitted, false, 'download never touches remote');
+    assert.match(vscode.window.errorMessages.at(-1)!, /retry \(local write failed/);
 
     await internals.handleMessage({ type: 'confirmAll' });
 
-    assert.equal(upserts().length, 1, 'no second DB commit');
-    assert.deepEqual(JSON.parse(readLocal(p)), { a: 1, theme: 'light' });
+    assert.equal(readLocal(p), 'new');
+    assert.deepEqual(writes(), []);
     assert.equal(internals.items.length, 0);
+});
+
+test('conflict rows are left out of Confirm All until acted on individually', async () => {
+    const p = profile('conflict');
+    const calm = profile('calm');
+    const { internals, workspace, writes, readLocal } = await setup([
+        { profile: p, local: 'mine', localMtime: NEW, remote: 'theirs', remoteTime: OLD },
+        { profile: calm, local: 'old', localMtime: OLD, remote: 'new', remoteTime: NEW }
+    ]);
+    // Give "conflict" a baseline neither side matches: both changed since last sync.
+    const { SyncStateStore } = require('../src/core/syncState') as typeof import('../src/core/syncState');
+    const { baselineAfterSync, planSync } = require('../src/core/plan') as typeof import('../src/core/plan');
+    const { ConfigManager } = require('../src/config') as typeof import('../src/config');
+    const state = new SyncStateStore(ConfigManager.getSyncStateDir()!);
+    const key = { tableName: p.tableName, id: p.id, localPath: path.join(workspace, p.filePath) };
+    const base = planSync(p, { exists: true, content: 'base', mtime: OLD }, { data: 'base', updateTime: OLD, version: null });
+    state.put(baselineAfterSync(base, key, 'base', null, OLD));
+    // Re-open the panel so the plan sees the baseline.
+    (internals as unknown as { panel: unknown; items: unknown[] }).panel = null;
+    const { MultiSyncManager } = require('../src/multiSync') as typeof import('../src/multiSync');
+    await MultiSyncManager.start([p.name, calm.name]);
+    assert.deepEqual(internals.items.map((i) => [i.plan.profile.name, i.conflict]), [['conflict', true], ['calm', false]]);
+
+    await internals.handleMessage({ type: 'confirmAll' });
+
+    assert.equal(readLocal(calm), 'new');
+    assert.equal(readLocal(p), 'mine', 'conflict row untouched');
+    assert.deepEqual(writes(), []);
+    assert.deepEqual(internals.items.map((i) => i.plan.profile.name), ['conflict']);
 });
 
 test('confirm on a single download row writes the remote content verbatim when no keys are excluded', async () => {
     const p = profile('one');
     const other = profile('other');
-    const { internals, upserts, readLocal } = await setup([
+    const { internals, writes, readLocal } = await setup([
         { profile: p, local: 'old\n', localMtime: OLD, remote: 'new\n', remoteTime: NEW },
         { profile: other, local: 'x', localMtime: NEW, remote: 'y', remoteTime: OLD }
     ]);
@@ -150,13 +182,13 @@ test('confirm on a single download row writes the remote content verbatim when n
 
     assert.equal(readLocal(p), 'new\n');
     assert.equal(readLocal(other), 'x', 'other rows untouched');
-    assert.deepEqual(upserts(), []);
-    assert.deepEqual(internals.items.map((i) => i.profile.name), ['other']);
+    assert.deepEqual(writes(), []);
+    assert.deepEqual(internals.items.map((i) => i.plan.profile.name), ['other']);
 });
 
 test('confirm on a single upload row with excludeKeys merges remote values back before committing', async () => {
     const p = profile('one-ul', { excludeKeys: ['theme'] });
-    const { internals, upserts, readLocal } = await setup([{
+    const { internals, writes, readLocal } = await setup([{
         profile: p,
         local: '{"a": 1, "theme": "dark"}',
         localMtime: NEW,
@@ -166,8 +198,43 @@ test('confirm on a single upload row with excludeKeys merges remote values back 
 
     await internals.handleMessage({ type: 'confirm', profile: 'one-ul' });
 
-    const written = upserts();
+    const written = writes();
     assert.equal(written.length, 1);
     assert.deepEqual(JSON.parse(written[0][1] as string), { a: 1, theme: 'light' });
-    assert.equal(readLocal(p), written[0][1]);
+    assert.deepEqual(JSON.parse(readLocal(p)), { a: 1, theme: 'dark' });
+});
+
+test('a local file edited after loading is not overwritten, and the remote is not written either', async () => {
+    const p = profile('guard');
+    const { internals, writes, readLocal, workspace, vscode } = await setup([{
+        profile: p, local: 'mine', localMtime: NEW, remote: 'theirs', remoteTime: OLD
+    }]);
+    vscode.window.showErrorMessage = async (message: string) => {
+        vscode.window.errorMessages.push(message);
+        return undefined; // user dismisses the toast
+    };
+    fs.writeFileSync(path.join(workspace, p.filePath), 'edited meanwhile');
+
+    await internals.handleMessage({ type: 'confirmAll' });
+
+    assert.equal(readLocal(p), 'edited meanwhile');
+    assert.deepEqual(writes(), []);
+    assert.equal(internals.items.length, 1);
+    assert.match(vscode.window.errorMessages.at(-1)!, /local file changed since loaded\)\. Reload to see the current state\./);
+});
+
+test('Reload after a stale row re-plans the panel from fresh data', async () => {
+    const p = profile('reload');
+    const { internals, workspace } = await setup([{
+        profile: p, local: 'mine', localMtime: NEW, remote: 'theirs', remoteTime: OLD
+    }]);
+    fs.writeFileSync(path.join(workspace, p.filePath), 'edited meanwhile');
+
+    await internals.handleMessage({ type: 'confirmAll' }); // mock toast picks its first button: Reload
+    for (let i = 0; i < 20 && internals.items.length === 0; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.equal(internals.items.length, 1);
+    assert.equal((internals.items[0].plan as unknown as { localOriginal: string }).localOriginal, 'edited meanwhile');
 });

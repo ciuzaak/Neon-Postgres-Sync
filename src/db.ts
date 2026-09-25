@@ -24,7 +24,8 @@ export class DatabaseService {
         return connectionString.trim();
     }
 
-    private static async getStore(): Promise<RecordStore> {
+    /** The RecordStore for the configured connection; prompts and throws if none is set. */
+    static async getRecordStore(): Promise<RecordStore> {
         this.ensureConnectionStringListenerRegistered();
 
         const connectionString = await this.getConnectionString();
@@ -54,19 +55,9 @@ export class DatabaseService {
         // fails fast instead of triggering the missing-URL prompt.
         assertValidTableName(profile.tableName);
         try {
-            return await (await this.getStore()).fetch(profile);
+            return await (await this.getRecordStore()).fetch(profile);
         } catch (error) {
             console.error('Error fetching record with meta:', error);
-            throw error;
-        }
-    }
-
-    static async updateRecord(profile: Profile, data: string): Promise<void> {
-        assertValidTableName(profile.tableName);
-        try {
-            await (await this.getStore()).upsert(profile, data);
-        } catch (error) {
-            console.error('Error updating record:', error);
             throw error;
         }
     }
@@ -77,22 +68,9 @@ export class DatabaseService {
         }
         profiles.forEach((p) => assertValidTableName(p.tableName));
         try {
-            return await (await this.getStore()).fetchMany(profiles);
+            return await (await this.getRecordStore()).fetchMany(profiles);
         } catch (error) {
             console.error('Error fetching records batch:', error);
-            throw error;
-        }
-    }
-
-    static async updateRecords(items: Array<{ profile: Profile; data: string }>): Promise<void> {
-        if (items.length === 0) {
-            return;
-        }
-        items.forEach(({ profile }) => assertValidTableName(profile.tableName));
-        try {
-            await (await this.getStore()).upsertMany(items);
-        } catch (error) {
-            console.error('Error updating records batch:', error);
             throw error;
         }
     }
