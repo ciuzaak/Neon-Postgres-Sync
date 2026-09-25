@@ -262,6 +262,16 @@ test('fuzz: duplicate keys resolve like JSON.parse (last wins) and are stripped 
     assert.deepEqual(JSON.parse(mergeBack('{"k":"x","k":"y"}', '{"k":"r"}', [['k']])), { k: 'r' });
 });
 
+test('fuzz: a filtered key is stripped from every duplicate parent, not just the effective one', () => {
+    const out = stripKeys('{"a":{"k":"secret"},"a":{"j":2}}', [['a', 'k']]);
+    assert.equal(out.includes('secret'), false);
+});
+
+test('fuzz: stripping handles any number of duplicate copies', () => {
+    const many = `{${Array.from({ length: 1200 }, (_, i) => `"k":${i}`).join(',')}}`;
+    assert.equal(stripKeys(many, [['k']]), '{}');
+});
+
 test('fuzz: trailing-comma style survives a strip → merge → strip round trip', () => {
     const K = [['k']];
     for (const local of ['{\n  "a": 1,\n  "k": 2,\n}', '{"a": 1, "k": 2,}', '{ "a": 1, "b": 3, "k": 2 }', '{"theme":"x","a":2}']) {

@@ -189,6 +189,23 @@ function findValue(root: jsoncParser.Node, path: KeyPath): jsoncParser.Node | un
     return node;
 }
 
+/**
+ * Every node at `path`, following all duplicate keys along the way (not just
+ * the last-wins one). Used for removal, so a shadowed duplicate parent can't
+ * keep carrying a hidden value in the text.
+ */
+function findAllValues(root: jsoncParser.Node, path: KeyPath): jsoncParser.Node[] {
+    let nodes = [root];
+    for (const segment of path) {
+        nodes = nodes.flatMap((node) =>
+            node.type === 'object'
+                ? propertiesNamed(node, segment).map((p) => p.children?.[1]).filter((v): v is jsoncParser.Node => !!v)
+                : []
+        );
+    }
+    return nodes;
+}
+
 /** Delete [start, end) — widened to whole lines when it has its line(s) to itself. */
 function spanOrLinesEdit(text: string, start: number, end: number): jsoncParser.Edit {
     const lineEnd = lineContentEndOf(text, end);
@@ -237,21 +254,33 @@ function propertyRemovalEdits(text: string, property: jsoncParser.Node): jsoncPa
 }
 
 /**
- * Remove every property at `path` (all duplicates, so no shadowed copy is
- * left to take effect); no-op if absent or unreachable. Only object
- * properties are addressable (see parsePaths).
+ * Remove every property at `path` — every duplicate, under every duplicate
+ * parent — so no shadowed copy is left carrying the hidden value in the
+ * text; no-op if absent or unreachable. Only object properties are
+ * addressable (see parsePaths). One property is removed per pass (offsets
+ * shift), last in the document first.
  */
 function removeProperty(text: string, path: KeyPath): string {
+    const matches = (t: string): jsoncParser.Node[] => {
+        const tree = jsoncParser.parseTree(t, [], PARSE_OPTIONS);
+        if (!tree) return [];
+        const key = path[path.length - 1];
+        return findAllValues(tree, path.slice(0, -1))
+            .filter((parent) => parent.type === 'object')
+            .flatMap((parent) => propertiesNamed(parent, key))
+            .sort((a, b) => b.offset - a.offset);
+    };
+
     let current = text;
-    for (let guard = 0; guard < 1000; guard++) {
-        const tree = jsoncParser.parseTree(current, [], PARSE_OPTIONS);
-        const parent = tree && (path.length === 1 ? tree : findValue(tree, path.slice(0, -1)));
-        if (!parent || parent.type !== 'object') return current;
-        const props = propertiesNamed(parent, path[path.length - 1]);
-        if (props.length === 0) return current;
-        current = jsoncParser.applyEdits(current, propertyRemovalEdits(current, props[props.length - 1]));
+    const initial = matches(current).length;
+    for (let pass = 0; pass <= initial; pass++) {
+        const [last] = matches(current);
+        if (!last) return current;
+        current = jsoncParser.applyEdits(current, propertyRemovalEdits(current, last));
     }
-    return current;
+    // Each pass removes exactly one property, so this is unreachable unless
+    // an edit failed to remove its target — never return a partial strip.
+    throw new Error(`Failed to remove "${path.join('.')}": property still present after ${initial} removals.`);
 }
 
 /**
