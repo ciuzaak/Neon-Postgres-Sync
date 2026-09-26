@@ -26,7 +26,7 @@ Sync local files with Neon Postgres records. This extension allows you to upload
 The same syncing is available from the terminal, without opening an editor — with the same profiles, the same sync history and the same safety rules:
 
 ```bash
-npm install -g neon-sync
+npm install -g @ciuzaakwong/neon-sync
 neon-sync config set-url   # stored in the OS keychain
 neon-sync                  # what's out of sync, then offers to apply it
 ```

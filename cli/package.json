@@ -1,11 +1,11 @@
 {
-    "name": "neon-sync",
+    "name": "@ciuzaakwong/neon-sync",
     "version": "0.1.0",
     "description": "Sync local config files with a Neon Postgres table \u2014 the CLI companion to the Neon Postgres Sync VS Code extension",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/ciuzaak/Neon-Postgres-Sync.git",
+        "url": "git+https://github.com/ciuzaak/Neon-Postgres-Sync.git",
         "directory": "cli"
     },
     "bin": {
@@ -15,6 +15,9 @@
         "dist",
         "LICENSE"
     ],
+    "publishConfig": {
+        "access": "public"
+    },
     "engines": {
         "node": ">=20.12"
     },
