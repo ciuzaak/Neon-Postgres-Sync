@@ -37,6 +37,18 @@ function isWriteDenied(e: unknown): boolean {
     return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
 }
 
+/**
+ * A write denial that will still be there next launch: a read-only file
+ * system, the explicit read-only check before an atomic write (syscall
+ * `access`), or any denial outside Windows. On Windows EPERM/EACCES from a
+ * rename or mkdir may just mean another program (OneDrive, antivirus) holds
+ * the file for longer than our retries: not a reason to stop migrating.
+ */
+function isLastingWriteDenial(e: unknown): boolean {
+    const err = e as NodeJS.ErrnoException;
+    return isWriteDenied(e) && (err.code === 'EROFS' || err.syscall === 'access' || process.platform !== 'win32');
+}
+
 /** The extension host must never freeze long on the config lock. */
 const EXTENSION_LOCK_WAIT_MS = 2_000;
 /** ...nor retry Windows' transient file errors for long (per operation). */
@@ -172,9 +184,10 @@ export class ConfigManager {
                 return report.added.length > 0 || !shared.exists() ? config : undefined;
             });
         } catch (e) {
-            if (e instanceof ConfigLockedError || (isWriteDenied(e) && !shared.exists())) {
-                // Busy, or a (possibly transient) permission error before the
-                // shared file exists: retry next launch, no marker. Until then
+            if (e instanceof ConfigLockedError || (isWriteDenied(e) && (!shared.exists() || !isLastingWriteDenial(e)))) {
+                // Busy, a (possibly transient) permission error before the
+                // shared file exists, or a Windows denial that may just be
+                // another program holding the file: retry next launch, no marker. Until then
                 // show this editor's own profiles (read-only) if there's no shared file yet.
                 const reason = e instanceof Error ? e.message : String(e);
                 if (!shared.exists()) this.legacyFallback = `the shared config couldn't be created yet (${reason}); it will be retried next launch`;
@@ -182,7 +195,7 @@ export class ConfigManager {
                 return undefined;
             }
             if (isWriteDenied(e)) {
-                // The shared file exists but can't be written here.
+                // The shared file exists and can't be written here, for good.
                 // A read-only shared config (e.g. managed by home-manager) is
                 // supported: keep using it, record that nothing was copied,
                 // and say so once. The profiles stay in this editor's backup.
