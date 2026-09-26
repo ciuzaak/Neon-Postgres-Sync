@@ -3,15 +3,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { ConfigManager, Profile } from './config';
-import { DatabaseService } from './db';
-import { KeyPath, parsePaths, assertJsonc, stripKeys, mergeBack, JsoncFilterParseError, JsoncFilterMergeError } from './jsoncFilter';
+import { createSyncEngine, resolveWorkspacePath } from './hostEngine';
+import type { ApplyOutcome } from './core/engine';
+import { KeyPath, stripKeys } from './core/jsoncFilter';
+import type { ChangeKind, SyncPlan } from './core/plan';
+import type { SyncDirection } from './core/types';
 
-export type SyncDirection = 'download' | 'upload';
+export type { SyncDirection } from './core/types';
 export type SyncOutcome = 'confirmed' | 'cancelled';
-
-// Local mtime (OS clock) and remote update_time (DB server clock) can drift.
-// Treat any gap smaller than this as ambiguous and warn the user to verify direction.
-const AMBIGUOUS_TIMESTAMP_GAP_MS = 5_000;
 
 interface SyncSession {
     direction: SyncDirection;
@@ -29,11 +28,18 @@ interface SyncSession {
     externalResolver?: (outcome: SyncOutcome, candidateContent: string, direction: SyncDirection) => void;
     resolved?: boolean;
     excludeKeys: KeyPath[];
+    /** The plan this diff was opened from; set for the built-in flow (not external callers). */
+    plan?: SyncPlan;
 }
 
 export class SyncManager {
     private static currentSession: SyncSession | null = null;
     private static isSwapping = false;
+
+    /** A diff session (single sync, or one opened from the multi-profile panel) is open. */
+    static hasActiveSession(): boolean {
+        return this.currentSession !== null;
+    }
 
     /**
      * Register a listener to detect when the diff editor is closed,
@@ -75,6 +81,10 @@ export class SyncManager {
     }
 
     static async startSync(profileName: string) {
+        if (this.currentSession) {
+            vscode.window.showWarningMessage('Finish or cancel the open sync diff first.');
+            return;
+        }
         const profile = ConfigManager.getProfile(profileName);
         if (!profile) {
             vscode.window.showErrorMessage(`Profile "${profileName}" not found.`);
@@ -85,65 +95,30 @@ export class SyncManager {
             { location: vscode.ProgressLocation.Notification, title: `Syncing ${profile.name}...` },
             async () => {
                 try {
-                    const { data: remoteData, updateTime: remoteUpdateTime } =
-                        await DatabaseService.fetchRecordWithMeta(profile);
+                    const [plan] = await (await createSyncEngine([profile])).plan([profile]);
 
-                    const absolutePath = this.resolvePath(profile.filePath);
-                    const localExists = fs.existsSync(absolutePath);
-                    let localContent = '';
-                    let localMtime: Date | null = null;
-                    if (localExists) {
-                        localContent = fs.readFileSync(absolutePath, 'utf-8');
-                        localMtime = fs.statSync(absolutePath).mtime;
-                    }
-
-                    const remoteExists = remoteData !== null;
-                    const remoteContent = remoteData ?? '';
-
-                    const excludeKeys = parsePaths(Array.isArray(profile.excludeKeys) ? profile.excludeKeys : []);
-
-                    let localForCompare = localContent;
-                    let remoteForCompare = remoteContent;
-                    if (excludeKeys.length > 0) {
-                        try {
-                            if (localExists) assertJsonc(localContent, 'local');
-                            if (remoteExists) assertJsonc(remoteContent, 'remote');
-                        } catch (e) {
-                            if (e instanceof JsoncFilterParseError) {
-                                vscode.window.showErrorMessage(
-                                    `Profile "${profile.name}" has excludeKeys but ${e.side} is not valid JSONC: ${e.message}`
-                                );
-                                return;
-                            }
-                            throw e;
+                    switch (plan.status) {
+                        case 'parse-error':
+                            vscode.window.showErrorMessage(
+                                `Profile "${profile.name}" has excludeKeys but ${plan.parseError!.side} is not valid JSONC: ${plan.parseError!.message}`
+                            );
+                            return;
+                        case 'missing-both':
+                            vscode.window.showWarningMessage(
+                                `Neither local file nor remote record exists for "${profile.name}".`
+                            );
+                            return;
+                        case 'identical': {
+                            const suffix = plan.excludeKeys.length > 0 ? ' after exclude' : '';
+                            vscode.window.showInformationMessage(`Content is identical${suffix}. No sync needed.`);
+                            return;
                         }
-                        if (localExists) localForCompare = stripKeys(localContent, excludeKeys);
-                        if (remoteExists) remoteForCompare = stripKeys(remoteContent, excludeKeys);
                     }
 
-                    if (!localExists && !remoteExists) {
-                        vscode.window.showWarningMessage(
-                            `Neither local file nor remote record exists for "${profile.name}".`
-                        );
-                        return;
-                    }
-
-                    if (localExists && remoteExists && localForCompare === remoteForCompare) {
-                        const suffix = excludeKeys.length > 0 ? ' after exclude' : '';
-                        vscode.window.showInformationMessage(`Content is identical${suffix}. No sync needed.`);
-                        return;
-                    }
-
-                    const suggestion = this.decideSyncDirection(
-                        localExists,
-                        remoteExists,
-                        localMtime,
-                        remoteUpdateTime
-                    );
-
+                    const suggestion = plan.suggestion;
                     let direction: SyncDirection;
                     if (suggestion.ambiguous) {
-                        const picked = await this.promptAmbiguousDirection(profile, suggestion.reason, suggestion.direction);
+                        const picked = await this.promptAmbiguousDirection(profile, suggestion.reason, suggestion.direction, plan.change);
                         if (!picked) return;
                         direction = picked;
                     } else {
@@ -154,7 +129,10 @@ export class SyncManager {
                         );
                     }
 
-                    await this.openDiff(profile, direction, localContent, remoteContent, { excludeKeys });
+                    await this.openDiff(profile, direction, plan.localOriginal, plan.remoteOriginal, {
+                        excludeKeys: plan.excludeKeys,
+                        plan
+                    });
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Error starting sync: ${error.message}`);
                 }
@@ -170,12 +148,9 @@ export class SyncManager {
      * or closes the diff editor.
      *
      * When `excludeKeys` is non-empty, the diff editor shows the STRIPPED content
-     * (via openDiff's strip step) and the resolver receives the user-edited
-     * stripped candidate. The caller is then responsible for calling
-     * jsoncFilter.mergeBack against its own raw originals before persisting —
-     * SyncManager.applyMergeBack deliberately short-circuits for external resolvers
-     * because the caller's persistence boundary is wider (e.g. multi-sync's batch
-     * upload + per-row local write).
+     * and the resolver receives the user-edited stripped candidate. The caller
+     * persists it via SyncEngine.apply, which merges each side's own excluded
+     * values back in.
      */
     static openDiffForExternal(
         profile: Profile,
@@ -223,7 +198,7 @@ export class SyncManager {
             if (choice !== 'Swap and Discard') return;
         }
 
-        const { profile, originalLocal, originalRemote, externalResolver, excludeKeys } = session;
+        const { profile, originalLocal, originalRemote, externalResolver, excludeKeys, plan } = session;
         const newDirection: SyncDirection = session.direction === 'download' ? 'upload' : 'download';
 
         this.isSwapping = true;
@@ -233,7 +208,8 @@ export class SyncManager {
                 externalResolver,
                 skipDefaultPersist: externalResolver !== undefined,
                 suppressInfoMessages: externalResolver !== undefined,
-                excludeKeys
+                excludeKeys,
+                plan
             });
         } finally {
             this.isSwapping = false;
@@ -254,65 +230,25 @@ export class SyncManager {
     private static async promptAmbiguousDirection(
         profile: Profile,
         reason: string,
-        suggested: SyncDirection
+        suggested: SyncDirection,
+        change: ChangeKind
     ): Promise<SyncDirection | undefined> {
         const downloadLabel = 'Download (Local ← Remote)';
         const uploadLabel = 'Upload (Remote ← Local)';
         const suggestedLabel = suggested === 'download' ? downloadLabel : uploadLabel;
         const otherLabel = suggested === 'download' ? uploadLabel : downloadLabel;
 
+        const message = change === 'both'
+            ? `Conflict in "${profile.name}": ${reason}. Pick which side wins; the other side's changes will show as removals in the diff.`
+            : `Cannot auto-decide sync direction for "${profile.name}" (${reason}). Clocks may be skewed; pick a direction:`;
         const choice = await vscode.window.showWarningMessage(
-            `Cannot auto-decide sync direction for "${profile.name}" (${reason}). Clocks may be skewed; pick a direction:`,
+            message,
             { modal: true },
             suggestedLabel,
             otherLabel
         );
         if (!choice) return undefined;
         return choice === downloadLabel ? 'download' : 'upload';
-    }
-
-    static decideSyncDirection(
-        localExists: boolean,
-        remoteExists: boolean,
-        localMtime: Date | null,
-        remoteUpdateTime: Date | null
-    ): { direction: SyncDirection; reason: string; ambiguous: boolean } {
-        if (!localExists) {
-            return { direction: 'download', reason: 'no local file yet', ambiguous: false };
-        }
-        if (!remoteExists) {
-            return { direction: 'upload', reason: 'no remote record yet', ambiguous: false };
-        }
-        if (!remoteUpdateTime && localMtime) {
-            return { direction: 'upload', reason: 'remote has no update_time', ambiguous: true };
-        }
-        if (!localMtime && remoteUpdateTime) {
-            return { direction: 'download', reason: 'local has no mtime', ambiguous: true };
-        }
-        if (!localMtime && !remoteUpdateTime) {
-            return {
-                direction: 'upload',
-                reason: 'neither side has a timestamp; defaulting to upload',
-                ambiguous: true
-            };
-        }
-
-        const localTime = localMtime!.getTime();
-        const remoteTime = remoteUpdateTime!.getTime();
-        const ambiguous = Math.abs(remoteTime - localTime) < AMBIGUOUS_TIMESTAMP_GAP_MS;
-
-        if (remoteTime > localTime) {
-            return {
-                direction: 'download',
-                reason: `remote is newer (${remoteUpdateTime!.toISOString()} > local ${localMtime!.toISOString()})`,
-                ambiguous
-            };
-        }
-        return {
-            direction: 'upload',
-            reason: `local is newer (${localMtime!.toISOString()} ≥ remote ${remoteUpdateTime!.toISOString()})`,
-            ambiguous
-        };
     }
 
     private static async openDiff(
@@ -325,6 +261,7 @@ export class SyncManager {
             skipDefaultPersist?: boolean;
             suppressInfoMessages?: boolean;
             excludeKeys?: KeyPath[];
+            plan?: SyncPlan;
         } = {}
     ): Promise<void> {
         const languageId = await this.getLanguageIdForFile(profile.filePath);
@@ -371,7 +308,8 @@ export class SyncManager {
             editorCloseDisposable: this.registerEditorCloseListener(),
             externalResolver: options.externalResolver,
             resolved: false,
-            excludeKeys
+            excludeKeys,
+            plan: options.plan
         };
 
         await vscode.commands.executeCommand('setContext', 'neonSync.isSyncing', true);
@@ -418,32 +356,20 @@ export class SyncManager {
                 return;
             }
 
-            const finalContent = this.applyMergeBack(session, candidateContent);
-
             if (session.externalResolver) {
-                this.resolveSession('confirmed', finalContent);
+                // External callers get the stripped candidate and apply it themselves.
+                this.resolveSession('confirmed', candidateContent);
+            } else if (!session.plan) {
+                vscode.window.showErrorMessage('Error confirming sync: missing sync plan.');
             } else {
-                const localFilePath = this.resolvePath(session.profile.filePath);
-
-                if (session.direction === 'download') {
-                    fs.writeFileSync(localFilePath, finalContent);
-                    vscode.window.showInformationMessage(`Downloaded and saved to ${session.profile.filePath}`);
-                } else {
-                    await DatabaseService.updateRecord(session.profile, finalContent);
-                    fs.writeFileSync(localFilePath, finalContent);
-                    vscode.window.showInformationMessage(`Uploaded ${session.profile.name} to database and updated local file.`);
-                }
+                const [outcome] = await (await createSyncEngine([session.plan.profile])).apply([
+                    { plan: session.plan, direction: session.direction, candidate: candidateContent }
+                ]);
+                this.reportOutcome(outcome);
             }
-
         } catch (error: any) {
-            if (error instanceof JsoncFilterMergeError) {
-                vscode.window.showErrorMessage(
-                    `Cannot apply sync for "${session.profile.name}": ${error.message}`
-                );
-            } else {
-                const snippet = candidateContent ? candidateContent.substring(0, 100) : 'empty';
-                vscode.window.showErrorMessage(`Error confirming sync: ${error.message}. Content snippet: ${snippet}`);
-            }
+            const snippet = candidateContent ? candidateContent.substring(0, 100) : 'empty';
+            vscode.window.showErrorMessage(`Error confirming sync: ${error.message}. Content snippet: ${snippet}`);
         } finally {
             await this.cleanupSession(true);
         }
@@ -493,13 +419,51 @@ export class SyncManager {
     }
 
     static resolvePath(filePath: string): string {
-        if (path.isAbsolute(filePath)) {
-            return filePath;
+        return resolveWorkspacePath(filePath);
+    }
+
+    private static reportOutcome(outcome: ApplyOutcome): void {
+        const { profile } = outcome.request.plan;
+        // The toast can be clicked long after this sync ended, so go through
+        // the command, which applies the same guards as "Sync File".
+        const resync = (message: string) => {
+            void vscode.window.showErrorMessage(message, 'Re-sync').then((choice) => {
+                if (choice === 'Re-sync') void vscode.commands.executeCommand('neonSync.resyncProfile', profile.name);
+            });
+        };
+        switch (outcome.kind) {
+            case 'ok':
+                if (outcome.baselineError) {
+                    console.warn(`Neon Sync: could not record sync state for ${profile.name}: ${outcome.baselineError}`);
+                }
+                vscode.window.showInformationMessage(
+                    outcome.request.direction === 'download'
+                        ? `Downloaded and saved to ${profile.filePath}`
+                        : `Uploaded ${profile.name} to database and updated local file.`
+                );
+                return;
+            case 'stale-remote':
+                resync(`Remote record for "${profile.name}" changed since this diff was opened (another machine synced?). Nothing was written.`);
+                return;
+            case 'stale-local':
+                resync(outcome.remoteCommitted
+                    ? `Uploaded ${profile.name}, but its local file changed meanwhile and was not overwritten.`
+                    : `Local file for "${profile.name}" changed since this diff was opened. Nothing was written.`);
+                return;
+            case 'merge-error':
+                vscode.window.showErrorMessage(`Cannot apply sync for "${profile.name}": ${outcome.error.message}`);
+                return;
+            case 'local-write-failed':
+                vscode.window.showErrorMessage(
+                    outcome.remoteCommitted
+                        ? `Uploaded ${profile.name}, but writing the local file failed: ${outcome.error}`
+                        : `Error confirming sync: ${outcome.error}`
+                );
+                return;
+            case 'not-applied':
+                vscode.window.showErrorMessage(`Sync for "${profile.name}" was not applied.`);
+                return;
         }
-        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            return path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, filePath);
-        }
-        return filePath;
     }
 
     /**
@@ -533,19 +497,5 @@ export class SyncManager {
         } catch (e) {
             console.error(`Failed to set language for temp file`, e);
         }
-    }
-
-    private static applyMergeBack(session: SyncSession, candidateContent: string): string {
-        // External resolvers (e.g. MultiSyncManager) receive the raw candidate and
-        // are responsible for calling jsoncFilter.mergeBack themselves against their
-        // own cached originals. This split exists because multi-sync persists across
-        // a different transaction boundary and needs the merged bytes for both the
-        // remote upload AND the local write in a single coordinated step.
-        if (session.externalResolver) return candidateContent;
-        if (session.excludeKeys.length === 0) return candidateContent;
-        const destinationOriginal = session.direction === 'download'
-            ? session.originalLocal
-            : session.originalRemote;
-        return mergeBack(candidateContent, destinationOriginal, session.excludeKeys);
     }
 }

@@ -1,6 +1,6 @@
 import test = require('node:test');
 import assert = require('node:assert/strict');
-import { parsePaths } from '../src/jsoncFilter';
+import { parsePaths } from '../../src/core/jsoncFilter';
 
 test('parsePaths splits dot-separated strings, trims, drops empty, dedupes, preserves order', () => {
     assert.deepEqual(
@@ -32,7 +32,7 @@ test('parsePaths is non-destructive on the input array', () => {
     assert.deepEqual(input, ['a.b', 'a.b']);
 });
 
-import { assertJsonc, JsoncFilterParseError } from '../src/jsoncFilter';
+import { assertJsonc, JsoncFilterParseError } from '../../src/core/jsoncFilter';
 
 test('assertJsonc accepts plain JSON', () => {
     assertJsonc('{"a": 1, "b": [1, 2]}', 'local');
@@ -69,7 +69,7 @@ test('assertJsonc treats a whitespace-only string as invalid', () => {
     assert.throws(() => assertJsonc('   \n\t', 'local'), JsoncFilterParseError);
 });
 
-import { stripKeys } from '../src/jsoncFilter';
+import { stripKeys } from '../../src/core/jsoncFilter';
 
 test('stripKeys removes a single top-level key', () => {
     const out = stripKeys('{"a": 1, "b": 2}', [['a']]);
@@ -110,6 +110,40 @@ test('stripKeys preserves comments on surviving keys', () => {
     assert.equal(out.includes('"b"'), false);
 });
 
+test('stripKeys keeps the previous key\'s trailing comment when removing the last key', () => {
+    const out = stripKeys('{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n', [['theme']]);
+    assert.equal(out, '{\n    "fontSize": 14 // why 14\n}\n');
+});
+
+test('stripKeys keeps comment lines above the removed key', () => {
+    const out = stripKeys('{\n    "a": 1,\n    // about theme\n    "theme": "dark"\n}', [['theme']]);
+    assert.equal(out, '{\n    "a": 1\n    // about theme\n}');
+});
+
+test('stripKeys removes a key\'s own same-line comment but keeps the next key\'s', () => {
+    const out = stripKeys('{\n    "a": 1,\n    "theme": "dark", // mine\n    "b": 2 // keep\n}\n', [['theme']]);
+    assert.equal(out, '{\n    "a": 1,\n    "b": 2 // keep\n}\n');
+});
+
+test('stripKeys removes inline keys cleanly in any position', () => {
+    assert.equal(stripKeys('{"a": 1, "theme": "dark", "b": 2}', [['theme']]), '{"a": 1, "b": 2}');
+    assert.equal(stripKeys('{"theme": "dark", "a": 1}', [['theme']]), '{"a": 1}');
+    assert.equal(stripKeys('{"a": 1, /*c*/ "theme": "dark"}', [['theme']]), '{"a": 1 /*c*/ }');
+});
+
+test('stripKeys preserves CRLF line endings', () => {
+    const out = stripKeys('{\r\n    "a": 1, // x\r\n    "theme": "dark"\r\n}\r\n', [['theme']]);
+    assert.equal(out, '{\r\n    "a": 1 // x\r\n}\r\n');
+});
+
+test('stripKeys removes a multi-line value and a nested key', () => {
+    assert.deepEqual(
+        JSON.parse(stripKeys('{\n    "a": 1,\n    "obj": {\n        "x": [1,\n 2]\n    },\n    "z": 3\n}', [['obj']])),
+        { a: 1, z: 3 }
+    );
+    assert.equal(stripKeys('{"o": {"k": 1, "theme": 2}}', [['o', 'theme']]), '{"o": {"k": 1}}');
+});
+
 test('stripKeys tolerates trailing commas in the input', () => {
     const out = stripKeys('{"a": 1, "b": 2,}', [['a']]);
     const parsed = JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
@@ -121,7 +155,7 @@ test('stripKeys returns the input unchanged when paths array is empty', () => {
     assert.equal(stripKeys(input, []), input);
 });
 
-import { mergeBack, JsoncFilterMergeError } from '../src/jsoncFilter';
+import { mergeBack, JsoncFilterMergeError } from '../../src/core/jsoncFilter';
 
 test('mergeBack restores a top-level filtered key from destination', () => {
     const candidate = '{"shared": "new"}';
@@ -142,6 +176,114 @@ test('mergeBack removes filtered key from candidate when destination lacks it', 
     const destination = '{"a": 0}';
     const out = mergeBack(candidate, destination, [['stale']]);
     assert.deepEqual(JSON.parse(out), { a: 1 });
+});
+
+test('mergeBack deleting a key keeps the neighbouring key\'s comment', () => {
+    const out = mergeBack('{\n    "a": 1, // note\n    "stale": true\n}', '{"a": 0}', [['stale']]);
+    assert.equal(out, '{\n    "a": 1 // note\n}');
+});
+
+test('upload round trip keeps a comment next to an excluded key', () => {
+    const local = '{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n';
+    const remote = '{\n    "fontSize": 16,\n    "theme": "light"\n}\n';
+    const final = mergeBack(stripKeys(local, [['theme']]), remote, [['theme']]);
+    assert.match(final, /\/\/ why 14/);
+    assert.deepEqual(JSON.parse(final.replace(/\/\/.*$/gm, '')), { fontSize: 14, theme: 'light' });
+});
+
+test('mergeBack appends a restored key after a trailing comment, not before it', () => {
+    const out = mergeBack('{\n    "fontSize": 14 // why 14\n}\n', '{"theme": "light"}', [['theme']]);
+    assert.equal(out, '{\n    "fontSize": 14, // why 14\n    "theme": "light"\n}\n');
+});
+
+test('mergeBack insertion respects trailing commas, inline objects, empty objects, CRLF and tabs', () => {
+    assert.equal(mergeBack('{\n    "a": 1, // c\n}', '{"t": 1}', [['t']]), '{\n    "a": 1, // c\n    "t": 1,\n}', 'keeps trailing-comma style');
+    assert.equal(mergeBack('{"a": 1}', '{"t": "x"}', [['t']]), '{"a": 1, "t": "x"}');
+    assert.equal(mergeBack('{}', '{"t": "x"}', [['t']]), '{"t": "x"}');
+    assert.equal(mergeBack('{\n}', '{"t": "x"}', [['t']]), '{\n    "t": "x"\n}');
+    assert.equal(mergeBack('{\r\n    "a": 1 // c\r\n}\r\n', '{"t": 1}', [['t']]), '{\r\n    "a": 1, // c\r\n    "t": 1\r\n}\r\n');
+    assert.equal(mergeBack('{\n\t"a": 1\n}', '{"t": 1}', [['t']]), '{\n\t"a": 1,\n\t"t": 1\n}');
+});
+
+test('mergeBack inserts into an existing nested object at its indentation', () => {
+    const out = mergeBack('{\n    "o": {\n        "k": 1 // kc\n    }\n}', '{"o": {"t": 2}}', [['o', 't']]);
+    assert.equal(out, '{\n    "o": {\n        "k": 1, // kc\n        "t": 2\n    }\n}');
+});
+
+test('mergeBack splices the destination value verbatim, keeping its formatting and comments', () => {
+    const dest = '{\n    "obj": {\n        // inner\n        "k": 1.0\n    }\n}';
+    const out = mergeBack('{\n    "a": 1\n}', dest, [['obj']]);
+    assert.equal(out, '{\n    "a": 1,\n    "obj": {\n        // inner\n        "k": 1.0\n    }\n}');
+    // Replacing an existing value keeps the candidate's comments around it.
+    assert.equal(
+        mergeBack('{\n    "theme": "dark", // mine\n    "a": 1\n}', '{"theme": "light"}', [['theme']]),
+        '{\n    "theme": "light", // mine\n    "a": 1\n}'
+    );
+});
+
+test('strip → merge round trip reproduces the original projection exactly', () => {
+    const K = [['theme']];
+    const local = '{\n    "fontSize": 14, // why 14\n    "theme": "dark"\n}\n';
+    const after = mergeBack(stripKeys(local, K), '{\n    "fontSize": 16,\n    "theme": "light"\n}\n', K);
+    assert.equal(stripKeys(after, K), stripKeys(local, K));
+});
+
+// ── regressions found by fuzzing ───────────────────────────────────────
+
+test('fuzz: a comment right after `{` stays put when a key is restored into the emptied object', () => {
+    const K = [['editor', 'fontSize']];
+    const local = '{\n  "editor": { // per machine\n    "fontSize": 14\n  }\n}';
+    const stripped = stripKeys(local, K);
+    assert.equal(stripped, '{\n  "editor": { // per machine\n  }\n}');
+    const merged = mergeBack(stripped, '{"editor": {"fontSize": 16}}', K);
+    assert.equal(merged, '{\n  "editor": { // per machine\n    "fontSize": 16\n  }\n}');
+    assert.equal(stripKeys(merged, K), stripped);
+});
+
+test('fuzz: a comment between a value and a comma on a later line survives removal', () => {
+    assert.equal(
+        stripKeys('{\n  "k": 1\n  // about b\n  , "b": 2\n}', [['k']]),
+        '{\n  // about b\n   "b": 2\n}'
+    );
+    assert.deepEqual(JSON.parse(stripKeys('{"c":6\n/**/,}', [['c']]).replace(/\/\*\*\//, '')), {});
+    assert.match(stripKeys('{"c":6\n/**/,}', [['c']]), /\/\*\*\//);
+});
+
+test('fuzz: bare CR line endings are line breaks', () => {
+    assert.equal(stripKeys('{\n  "k": 1, // c\r  "b": 2\n}', [['k']]), '{\n  "b": 2\n}');
+    const merged = mergeBack('{\n  "x": {\n    "a": 1 // c\r  }, "b": 2\n}', '{"x":{"k":3}}', [['x', 'k']]);
+    assert.deepEqual(JSON.parse(merged.replace(/\/\/[^\r\n]*/g, '')), { x: { a: 1, k: 3 }, b: 2 });
+    assert.match(merged, /"a": 1, \/\/ c\r    "k": 3\r/);
+});
+
+test('fuzz: duplicate keys resolve like JSON.parse (last wins) and are stripped entirely', () => {
+    assert.equal(stripKeys('{"a":0,"a":1}', [['a']]), '{}');
+    assert.deepEqual(JSON.parse(mergeBack('{}', '{"b":9,"b":1}', [['b']])), { b: 1 });
+    assert.deepEqual(JSON.parse(mergeBack('{"k":"x","k":"y"}', '{"k":"r"}', [['k']])), { k: 'r' });
+});
+
+test('fuzz: a filtered key is stripped from every duplicate parent, not just the effective one', () => {
+    const out = stripKeys('{"a":{"k":"secret"},"a":{"j":2}}', [['a', 'k']]);
+    assert.equal(out.includes('secret'), false);
+});
+
+test('fuzz: stripping handles any number of duplicate copies', () => {
+    const many = `{${Array.from({ length: 1200 }, (_, i) => `"k":${i}`).join(',')}}`;
+    assert.equal(stripKeys(many, [['k']]), '{}');
+});
+
+test('fuzz: trailing-comma style survives a strip → merge → strip round trip', () => {
+    const K = [['k']];
+    for (const local of ['{\n  "a": 1,\n  "k": 2,\n}', '{"a": 1, "k": 2,}', '{ "a": 1, "b": 3, "k": 2 }', '{"theme":"x","a":2}']) {
+        const stripped = stripKeys(local, K);
+        assert.equal(stripKeys(mergeBack(stripped, '{"k": 3}', K), K), stripped, local);
+    }
+});
+
+test('fuzz: a key restored after a trailing line comment does not adopt it', () => {
+    const K = [['a'], ['b']];
+    const out = mergeBack('{"b":""\n,//\n}', '{"a":""}', K);
+    assert.match(stripKeys(out, K), /\/\//);
 });
 
 test('mergeBack with neither side holding the filtered key is a no-op', () => {

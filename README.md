@@ -9,7 +9,8 @@ Sync local files with Neon Postgres records. This extension allows you to upload
 
 ## Features
 
--   **One-Command Sync**: A single `Sync File` command auto-picks direction by comparing local file `mtime` with the remote `update_time`. When the timestamps are too close to trust (within 5s) or either side is missing a timestamp, it pauses and asks you to pick the direction explicitly.
+-   **One-Command Sync**: A single `Sync File` command auto-picks direction by checking which side changed since this machine last synced the profile. Only local changed → upload; only remote changed → download; both changed → a conflict prompt asks you to pick. Profiles never synced on this machine fall back to comparing local `mtime` with remote `update_time`.
+-   **Safe Writes**: Uploads only succeed if the remote still holds exactly what you reviewed — if another machine synced in the meantime, nothing is written and you're offered a re-sync. Likewise, a local file edited while the diff was open is never overwritten.
 -   **Multi-Profile Sync**: Pick `Sync Multiple Profiles…` from the same picker to open a batch page listing each selected profile's direction and added/removed line counts. Adjust direction, open a diff, confirm individually, or hit `Confirm All` to commit every pending row in a single atomic transaction. `Alt+A` toggles select-all in the multi-pick (respects the active search).
 -   **Manual Direction Override**: Click the `⇄` icon in the diff title bar (or press `Alt+S`) to flip the sync direction mid-review. Candidate-side edits (saved or unsaved) are protected with a confirmation before being discarded.
 -   **Text-based Sync**: Preserves comments, whitespace, and formatting in your files.
@@ -35,7 +36,9 @@ CREATE TABLE IF NOT EXISTS json_records (
 );
 ```
 
-**Note**: The `data` column must be of type `TEXT` to support raw content sync.
+**Note**: The `data` column must be of type `TEXT` to support raw content sync. (`json` columns keep text verbatim but reject comments; `jsonb` rewrites content into Postgres's canonical form, so a file uploaded there never compares identical to the stored row afterwards.)
+
+Each profile needs its own local file — two profiles pointing at the same file are refused at sync time.
 
 ### 2. Connection String and Profiles
 
@@ -113,7 +116,7 @@ Behavior:
 
 - **Diff view**: both sides are shown with the listed keys removed. Comments and formatting on remaining keys are preserved.
 - **Identical check**: if the only differences are filtered keys, the sync is treated as "already in sync" and skipped.
-- **Confirm**: the target side's current values for the filtered keys are spliced back in before writing. Locally edited values for filtered keys in the diff editor are also overwritten with the target's values (since these keys are "owned" by the target).
+- **Confirm**: each side keeps its own values for the filtered keys — they are spliced back in, verbatim, before writing. An upload writes the remote's values into the remote row and keeps the local file's own values locally. Values for filtered keys edited in the diff editor are overwritten (these keys are "owned" by each side).
 - **Parse failure**: if either side does not parse as JSONC (comments and trailing commas allowed), the sync is aborted with an error. The multi-profile panel keeps the row visible with an inline error.
 - **No filter**: profiles without `excludeKeys` (or with an empty list) behave exactly as before — pure raw-text sync.
 
@@ -133,26 +136,26 @@ Behavior:
 1. Run `Neon Sync: Sync File` and pick `Sync Multiple Profiles…` from the list (its position floats up as you use it).
 2. Check the profiles you want to sync (Space toggles, `Alt+A` toggles select-all for whatever matches the current search).
 3. The batch page fetches all selected records in a single HTTP transaction and lists every row that still needs syncing with its proposed direction and `+added / -removed` line counts. Identical profiles are skipped with a notification; missing-both profiles are called out separately.
-4. Per row you can `Swap` the direction, open a `Diff` (same editor as single-profile sync), or `Confirm` just that row. `Confirm All` commits every upload in a single atomic transaction, then writes the local files.
-5. If a local write fails after a successful remote commit, the affected row stays visible with a `remote committed` badge so a retry only re-runs the local write — it won't re-upload or bump `update_time`.
+4. Per row you can `Swap` the direction, open a `Diff` (same editor as single-profile sync), or `Confirm` just that row. `Confirm All` commits every upload in a single atomic transaction, then writes the local files. Rows marked `⚠ conflict` (both sides changed) are left out of `Confirm All` until you act on them individually.
+5. If any row's remote changed since the page loaded, `Confirm All` writes nothing and offers `Reload`. A row whose local file changed since loading is skipped the same way.
+6. If a local write fails after a successful remote commit, the affected row stays visible with a `remote committed` badge so a retry only re-runs the local write — it won't re-upload or bump `update_time`.
 
 ### Auto-direction rules
 
-| Local file | Remote record | Picked direction |
+After every successful sync, the extension records (per machine, per profile) a fingerprint of the content both sides agreed on. The next sync judges each side against that record:
+
+| Local since last sync | Remote since last sync | Picked direction |
 |-----------|---------------|------------------|
-| missing   | present       | `Local ← Remote` |
-| present   | missing       | `Remote ← Local` |
-| identical | identical     | no sync          |
-| present   | present       | newer timestamp wins |
+| unchanged | changed       | `Local ← Remote` |
+| changed   | unchanged     | `Remote ← Local` |
+| changed   | changed       | **conflict** — you pick |
+| identical now | identical now | no sync |
 
-**When auto-pick is skipped (explicit prompt instead):**
+With `excludeKeys`, changes confined to the filtered keys don't count. If one side is missing, the other side is copied over (`Local ← Remote` when the file is missing, `Remote ← Local` when the record is).
 
-Auto-resolution only runs when both timestamps are available and differ by at least 5 seconds. Otherwise the extension pauses and shows a modal with two buttons (`Download (Local ← Remote)` / `Upload (Remote ← Local)`) — you pick, or dismiss to abort the sync. The diff opens in the direction you picked, and you can still swap once it's open.
+**No sync history yet** (first sync on this machine, or the profile's `excludeKeys` changed since): the newer timestamp wins — local `mtime` vs remote `update_time` — unless they are within 5 seconds of each other or either is missing, in which case you're asked to pick (`Download (Local ← Remote)` / `Upload (Remote ← Local)`; dismissing aborts). Local `mtime` comes from the OS clock while `update_time` comes from the Neon server, so small gaps are unreliable. Profiles that are already in sync get a history record the first time they're checked.
 
-Cases that trigger the explicit prompt:
-
-- **Close timestamps**: local `mtime` and remote `update_time` differ by less than 5 seconds (including ties). Local `mtime` comes from the OS clock while `update_time` is the Neon server's `CURRENT_TIMESTAMP`, so small deltas are unreliable.
-- **Missing timestamps**: the remote row has no `update_time`, the local file has no usable `mtime`, or both.
+In every case the diff opens in the chosen direction and you can still swap before confirming. Sync history lives in VS Code's global storage (`sync-state/`), never in the database.
 
 ## Origin
 

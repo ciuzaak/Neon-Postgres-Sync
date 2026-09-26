@@ -10,7 +10,7 @@ import {
     resetMocks,
     type MockWebviewPanel
 } from './helpers/moduleMocks';
-import { PROFILE_TABLENAME_REGEX_SOURCE } from '../src/profileValidation';
+import { PROFILE_TABLENAME_REGEX_SOURCE } from '../src/core/profileValidation';
 
 installModuleMocks();
 

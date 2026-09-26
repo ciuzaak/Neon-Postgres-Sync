@@ -2,6 +2,23 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [Unreleased]
+### Added
+- **Change Detection by Sync History**: Each machine records what both sides looked like after its last sync of a profile. The next sync compares each side against that record instead of against the other side's clock: only local changed → upload, only remote changed → download, both changed → an explicit conflict prompt. Profiles with no history yet fall back to the timestamp rule.
+- **Conflict Rows (Multi-Sync)**: Rows where both sides changed get a `⚠ conflict` badge and are left out of `Confirm All` until handled individually.
+- **Safe Uploads**: Uploads are conditional on the remote still holding exactly what was reviewed. If another machine synced (or someone edited the row in the Neon console) in the meantime, nothing is written and a `Re-sync` / `Reload` is offered. A batch with any stale row writes nothing.
+- **Local File Guard**: A local file edited after the diff or batch page loaded is not overwritten — checked again right before writing. Local writes are atomic (a failure midway can no longer leave a truncated file), follow symlinks instead of replacing them, and keep the file's permissions.
+- **Shared-File Check**: Profiles that point at the same local file are refused at sync time; they would corrupt each other's sync history.
+
+### Changed
+- **One Sync at a Time**: `Sync File` and `Sync Multiple Profiles…` are refused while a sync diff is still open (finish or cancel it first). Previously a second sync silently replaced the open diff and left its temp files behind.
+
+### Fixed
+- **Upload Overwrote This Machine's Filtered Keys**: With `excludeKeys`, uploading also wrote the *remote's* values for the filtered keys into the local file, so e.g. a machine-specific theme was replaced on every upload. Each side now keeps its own values.
+- **`json` Data Columns Rewritten on Fetch**: When the table's `data` column was `json`/`jsonb` rather than the documented `TEXT`, fetched content was parsed and re-serialized (`1.0` became `1`, formatting and key order changed), so a round trip altered the file. Content is now read as the column's text: verbatim for `json`, Postgres's canonical form for `jsonb` (use `TEXT` to preserve comments and formatting).
+- **Key Filtering Lost Neighbouring Comments**: With `excludeKeys` active, removing a filtered key also deleted the comment trailing the previous key (e.g. `"fontSize": 14, // why 14`) and any comment lines just above the filtered key. The comment vanished from the diff and, once confirmed, from the written file on both sides. Only the filtered key and its own same-line comment are removed now.
+- **Key Filtering Moved Comments When Restoring Keys**: Splicing a filtered key back in placed the separating comma after the previous key's trailing comment, moving that comment onto the restored key's line (where the next sync would strip it). Restored keys are now appended on their own line, and the target's value is copied verbatim, so formatting and comments inside it (and number spellings like `1.0`) are preserved. Also covered: comments right after `{`, comments between a value and a comma on a later line, bare-CR line endings, duplicate keys (resolved like `JSON.parse`, last wins; all copies of a filtered key are hidden), and trailing-comma style.
+
 ## [0.7.0] - 2026-05-19
 ### Added
 - **Per-Profile Key Filtering (JSON/JSONC only)**: New `excludeKeys` field on each profile lists dot-separated key paths that should be hidden from the diff view and preserved on the target side at confirm time. Useful for machine-specific or transient keys (themes, machine IDs, locally chosen font sizes) that shouldn't propagate across machines. Edit via the settings panel's Advanced section in the Add/Edit Profile modal, or directly in `neon-sync.json`. Comments and formatting on non-filtered keys are preserved (powered by `jsonc-parser`).

@@ -46,18 +46,24 @@ function profile(overrides: Partial<Profile> = {}): Profile {
     };
 }
 
-test('updateRecord rejects unsafe table names before creating a database client', async () => {
-    const { neon } = resetMocks();
-    const { DatabaseService } = loadModules();
+test('createSyncEngine rejects unsafe table names before resolving the connection (no missing-URL prompt)', async () => {
+    const { vscode, neon } = resetMocks();
+    const { ConfigManager } = loadModules();
+    ConfigManager.initialize({
+        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`)),
+        secrets: { get: async () => undefined, store: async () => undefined, delete: async () => undefined }
+    } as never);
+    const { createSyncEngine } = require('../src/hostEngine') as typeof import('../src/hostEngine');
 
     await assert.rejects(
-        DatabaseService.updateRecord(profile({ tableName: 'records; drop table records' }), '{}'),
+        createSyncEngine([profile({ tableName: 'records; drop table records' })]),
         /Invalid table name/
     );
+    assert.deepEqual(vscode.window.errorMessages, []);
     assert.deepEqual(neon.calls, []);
 });
 
-test('updateRecord triggers the missing-URL prompt and throws when no connection is configured', async () => {
+test('getRecordStore triggers the missing-URL prompt and throws when no connection is configured', async () => {
     const { vscode, neon } = resetMocks();
     const { ConfigManager, DatabaseService } = loadModules();
     const secrets = new Map<string, string>();
@@ -71,7 +77,7 @@ test('updateRecord triggers the missing-URL prompt and throws when no connection
     } as never);
 
     await assert.rejects(
-        DatabaseService.updateRecord(profile(), '{}'),
+        DatabaseService.getRecordStore(),
         /^Error: PostgreSQL connection string is not configured\.$/
     );
     assert.deepEqual(vscode.window.errorMessages, [
@@ -80,7 +86,7 @@ test('updateRecord triggers the missing-URL prompt and throws when no connection
     assert.deepEqual(neon.calls, []);
 });
 
-test('fetchRecordWithMeta queries by id and parses object data and string update_time', async () => {
+test('the record store queries by id and parses object data and string update_time', async () => {
     const { DatabaseService, neon } = await configureConnection('  postgres://example  ');
     const sql = createMockSql();
     sql.queryResults.push({
@@ -93,65 +99,45 @@ test('fetchRecordWithMeta queries by id and parses object data and string update
     });
     neon.nextSql = sql;
 
-    const result = await DatabaseService.fetchRecordWithMeta(profile());
+    const result = await (await DatabaseService.getRecordStore()).fetch(profile());
 
     assert.equal(neon.calls[0], 'postgres://example');
     assert.equal(sql.queryCalls.length, 1);
-    assert.match(sql.queryCalls[0].query, /SELECT data, update_time FROM public\.records WHERE id = \$1/);
+    assert.match(sql.queryCalls[0].query, /SELECT data::text AS data, update_time, encode\(sha256\(convert_to\(data::text, current_setting\('server_encoding'\)\)\), 'hex'\) AS version FROM public\.records WHERE id = \$1/);
     assert.deepEqual(sql.queryCalls[0].params, ['row-1']);
     assert.equal(result.data, '{\n  "ok": true\n}');
     assert.equal(result.updateTime?.toISOString(), '2026-01-02T03:04:05.000Z');
 });
 
-test('fetchRecordWithMeta returns null fields when the row is absent', async () => {
+test('the record store returns null fields when the row is absent', async () => {
     const { DatabaseService, neon } = await configureConnection('postgres://example');
     const sql = createMockSql();
     sql.queryResults.push([]);
     neon.nextSql = sql;
 
-    const result = await DatabaseService.fetchRecordWithMeta(profile());
+    const result = await (await DatabaseService.getRecordStore()).fetch(profile());
 
-    assert.deepEqual(result, { data: null, updateTime: null });
+    assert.deepEqual(result, { data: null, updateTime: null, version: null });
 });
 
-test('updateRecord upserts the selected table with parameterized id and data', async () => {
-    const { DatabaseService, neon } = await configureConnection('postgres://example');
-    const sql = createMockSql();
-    neon.nextSql = sql;
-
-    await DatabaseService.updateRecord(profile({ id: 'abc', tableName: 'records' }), '{"hello":"world"}');
-
-    assert.equal(sql.queryCalls.length, 1);
-    assert.match(sql.queryCalls[0].query, /INSERT INTO records \(id, data, create_time, update_time\)/);
-    assert.match(sql.queryCalls[0].query, /ON CONFLICT \(id\)/);
-    assert.deepEqual(sql.queryCalls[0].params, ['abc', '{"hello":"world"}']);
-});
-
-test('fetchRecordsWithMeta returns early for an empty batch without opening a database client', async () => {
+test('an empty batch fetch returns early without opening a database client', async () => {
     const { neon } = resetMocks();
     const { DatabaseService } = await configureConnection('postgres://example');
 
-    const result = await DatabaseService.fetchRecordsWithMeta([]);
+    const result = await (await DatabaseService.getRecordStore()).fetchMany([]);
 
     assert.deepEqual(result, []);
     assert.deepEqual(neon.calls, []);
 });
 
-test('updateRecords builds one query per item and sends them through a transaction', async () => {
-    const { DatabaseService, neon } = await configureConnection('postgres://example');
-    const sql = createMockSql();
-    neon.nextSql = sql;
+test('after the connection string changes, the next call connects with the new string', async () => {
+    const { DatabaseService, neon } = await configureConnection('postgres://first');
+    const { ConfigManager } = require('../src/config') as typeof import('../src/config');
 
-    await DatabaseService.updateRecords([
-        { profile: profile({ id: 'a', tableName: 'records' }), data: 'A' },
-        { profile: profile({ id: 'b', tableName: 'public.records' }), data: 'B' }
-    ]);
+    await (await DatabaseService.getRecordStore()).fetch(profile());
+    await (await DatabaseService.getRecordStore()).fetch(profile());
+    await ConfigManager.setConnectionString('postgres://second');
+    await (await DatabaseService.getRecordStore()).fetch(profile());
 
-    assert.equal(sql.queryCalls.length, 2);
-    assert.match(sql.queryCalls[0].query, /INSERT INTO records/);
-    assert.deepEqual(sql.queryCalls[0].params, ['a', 'A']);
-    assert.match(sql.queryCalls[1].query, /INSERT INTO public\.records/);
-    assert.deepEqual(sql.queryCalls[1].params, ['b', 'B']);
-    assert.equal(sql.transactionCalls.length, 1);
-    assert.equal(sql.transactionCalls[0].length, 2);
+    assert.deepEqual(neon.calls, ['postgres://first', 'postgres://second']);
 });

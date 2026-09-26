@@ -7,7 +7,7 @@ import {
     hasErrors,
     PROFILE_TABLENAME_REGEX_SOURCE,
     ProfileFormValues
-} from './profileValidation';
+} from './core/profileValidation';
 
 export interface SettingsPanelOptions {
     focus?: 'connection';

@@ -4,7 +4,7 @@ import {
     validateProfileForm,
     hasErrors,
     PROFILE_TABLENAME_REGEX_SOURCE
-} from '../src/profileValidation';
+} from '../../src/core/profileValidation';
 
 const valid = {
     name: 'my-profile',
