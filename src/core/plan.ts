@@ -61,6 +61,13 @@ export interface SyncPlan extends MergeContext {
     remoteVersion: string | null;
     status: PlanStatus;
     change: ChangeKind;
+    /**
+     * A baseline exists for this profile on this machine (usable or not).
+     * With one side missing, this distinguishes first-time setup (no
+     * baseline: copying the other side over is safe) from a side deleted
+     * since the last sync (restoring it may undo a deliberate deletion).
+     */
+    baselineExists: boolean;
     suggestion: DirectionSuggestion;
     parseError?: JsoncFilterParseError;
 }
@@ -153,6 +160,7 @@ export function planSync(
         excludeKeys,
         status,
         change,
+        baselineExists: baseline !== undefined,
         suggestion,
         parseError
     };
@@ -288,9 +296,20 @@ export function computeDiffStats(
     }
 }
 
+/**
+ * Lines of `content`: any line break (\n, \r\n or a bare \r) ends a line,
+ * and a final line break doesn't start another (so "a\n" is one line).
+ */
 function splitLines(content: string): string[] {
     if (content === '') return [];
-    return content.split(/\r?\n/);
+    const lines = content.split(/\r\n|\r|\n/);
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    return lines;
+}
+
+/** Number of lines, counted the same way as computeDiffStats. */
+export function countLines(content: string): number {
+    return splitLines(content).length;
 }
 
 function lcsLength(a: string[], b: string[]): number {

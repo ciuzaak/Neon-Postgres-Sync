@@ -121,7 +121,28 @@ let originalLoad: ModuleLoader | undefined;
 let currentVscode = createVscodeMock();
 let currentNeon = createNeonMock();
 
+/**
+ * Tests must never touch the real per-user config/state (core/paths reads
+ * the home directory). Point every home-ish variable at a throwaway dir as
+ * soon as any test file installs the mocks.
+ */
+function isolateHome(): void {
+    if (process.env.NEON_SYNC_TEST_HOME) return;
+    const home = require('node:fs').mkdtempSync(path.join(require('node:os').tmpdir(), 'neon-sync-test-home-'));
+    process.env.NEON_SYNC_TEST_HOME = home;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.APPDATA = path.join(home, 'AppData', 'Roaming');
+    process.env.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
+}
+
+/** Shared-config locations for ConfigManager.initialize in tests: config lives in `configDir`. */
+export function testLocations(configDir: string): { configDir: string; stateDir: string } {
+    return { configDir, stateDir: path.join(configDir, '.state') };
+}
+
 export function installModuleMocks(): void {
+    isolateHome();
     if (originalLoad) return;
     originalLoad = moduleWithLoad._load;
     moduleWithLoad._load = function patchedLoad(
@@ -170,9 +191,16 @@ export function createMockSql(): MockSql {
     return sql;
 }
 
+/**
+ * Drop every compiled project module (extension, core and CLI) from the
+ * require cache, so the next require gets fresh instances wired to the
+ * current mocks. Leaving any layer cached would mix class identities across
+ * tests (e.g. an `instanceof StaleRemoteError` check against a stale copy).
+ */
 export function purgeProjectModules(): void {
+    const roots = ['src', 'cli'].map((dir) => `${path.sep}out-test${path.sep}${dir}${path.sep}`);
     for (const key of Object.keys(require.cache)) {
-        if (key.includes(`${path.sep}out-test${path.sep}src${path.sep}`)) {
+        if (roots.some((root) => key.includes(root))) {
             delete require.cache[key];
         }
     }

@@ -3,15 +3,17 @@ import { ConfigManager, Profile } from './config';
 import { DatabaseService } from './db';
 import { assertValidTableName } from './core/db';
 import { profilesSharingLocalFiles, SyncEngine } from './core/engine';
-import { resolveProfilePath } from './core/localFile';
+import { realPathOrParent, resolveProfilePath } from './core/localFile';
+import { wslBoundaryError } from './core/paths';
 import { SyncStateStore } from './core/syncState';
 
 /**
- * Profiles among `profiles` that share their local file with any configured
- * profile (they'd corrupt each other's sync history), mapped by name to a
- * message naming both profiles and both paths.
+ * Profiles among `profiles` that must not be synced from here, mapped by
+ * name to the reason: sharing a local file with any configured profile
+ * (they'd corrupt each other's sync history), or a file on the other side of
+ * a WSL boundary (its history would be split across two machines' state).
  */
-export function sharedFileClashes(profiles: Profile[]): Map<string, string> {
+export function syncBlockers(profiles: Profile[]): Map<string, string> {
     const names = new Set(profiles.map((p) => p.name));
     const out = new Map<string, string>();
     for (const [a, b] of profilesSharingLocalFiles(ConfigManager.getProfiles(), resolveWorkspacePath)) {
@@ -19,6 +21,11 @@ export function sharedFileClashes(profiles: Profile[]): Map<string, string> {
         for (const p of [a, b]) {
             if (names.has(p.name) && !out.has(p.name)) out.set(p.name, message);
         }
+    }
+    for (const p of profiles) {
+        if (out.has(p.name)) continue;
+        const wsl = wslBoundaryError(realPathOrParent(resolveWorkspacePath(p.filePath)));
+        if (wsl) out.set(p.name, `Profile "${p.name}" (${p.filePath}): ${wsl}.`);
     }
     return out;
 }
@@ -30,7 +37,7 @@ export function resolveWorkspacePath(filePath: string): string {
 
 /**
  * A SyncEngine wired to this host: the configured connection (prompting and
- * throwing if none is set) and baselines under globalStorage. The profiles
+ * throwing if none is set) and baselines in the shared state directory. The profiles
  * about to be synced are validated first, so a bad table name fails as such
  * instead of surfacing the missing-connection prompt, and a profile sharing
  * its local file with any configured profile is refused (see
@@ -38,7 +45,7 @@ export function resolveWorkspacePath(filePath: string): string {
  */
 export async function createSyncEngine(profiles: Profile[]): Promise<SyncEngine> {
     profiles.forEach((p) => assertValidTableName(p.tableName));
-    const clashes = sharedFileClashes(profiles);
+    const clashes = syncBlockers(profiles);
     if (clashes.size > 0) {
         throw new Error([...clashes.values()][0]);
     }

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { ConfigManager, Profile } from './config';
+import { abbreviateHome, expandHome } from './core/paths';
 import {
     validateProfileForm,
     hasErrors,
@@ -147,7 +148,9 @@ export class SettingsPanel {
         await webview.postMessage({
             command: 'loadSettings',
             connectionString: connectionString ?? '',
-            profiles: ConfigManager.getProfiles()
+            profiles: ConfigManager.getProfiles(),
+            configPath: ConfigManager.getConfigPathForDisplay() ?? '',
+            configFallback: ConfigManager.getFallbackReason() ?? ''
         });
         this._settingsLoaded = true;
         if (this._pendingFocus) {
@@ -170,7 +173,6 @@ export class SettingsPanel {
     }
 
     private async _handleSaveProfile(message: SaveProfileMessage): Promise<unknown> {
-        const profiles = ConfigManager.getProfiles();
         const incoming = message.profile ?? ({} as Partial<Profile>);
         const values: ProfileFormValues = {
             name: typeof incoming.name === 'string' ? incoming.name : '',
@@ -178,13 +180,6 @@ export class SettingsPanel {
             id: typeof incoming.id === 'string' ? incoming.id : '',
             tableName: typeof incoming.tableName === 'string' ? incoming.tableName : ''
         };
-        const errors = validateProfileForm(values, {
-            existingNames: profiles.map((p) => p.name),
-            originalName: message.originalName
-        });
-        if (hasErrors(errors)) {
-            return { command: 'profileSaveError', errors, originalName: message.originalName };
-        }
         const rawExcludes = Array.isArray((incoming as { excludeKeys?: unknown }).excludeKeys)
             ? ((incoming as { excludeKeys?: unknown }).excludeKeys as unknown[])
             : [];
@@ -196,10 +191,38 @@ export class SettingsPanel {
             tableName: values.tableName.trim()
         };
         if (excludeKeys.length > 0) cleaned.excludeKeys = excludeKeys;
-        const next: Profile[] = message.originalName !== undefined
-            ? profiles.map((p) => (p.name === message.originalName ? cleaned : p))
-            : [...profiles, cleaned];
-        await ConfigManager.saveProfiles(next);
+
+        // Validate and apply against a fresh read under the config lock: the
+        // CLI or another editor may have changed the list since this panel
+        // loaded it.
+        let errors: ReturnType<typeof validateProfileForm> = {};
+        let formError: string | undefined;
+        const next = ConfigManager.updateProfiles((profiles) => {
+            errors = validateProfileForm(values, {
+                existingNames: profiles.map((p) => p.name),
+                originalName: message.originalName
+            });
+            if (hasErrors(errors)) return undefined;
+            if (message.originalName !== undefined) {
+                if (!profiles.some((p) => p.name === message.originalName)) {
+                    formError = `"${message.originalName}" was renamed or removed elsewhere (e.g. by the neon-sync CLI). Close this dialog to see the current list.`;
+                    return undefined;
+                }
+                return profiles.map((p) => (p.name === message.originalName ? cleaned : p));
+            }
+            return [...profiles, cleaned];
+        });
+        if (hasErrors(errors) || formError) {
+            return { command: 'profileSaveError', errors, formError, originalName: message.originalName };
+        }
+        if (!next) {
+            return {
+                command: 'profileSaveError',
+                errors: {},
+                formError: 'Could not save the profile — see the error notification.',
+                originalName: message.originalName
+            };
+        }
         return { command: 'profilesSaved', profiles: next };
     }
 
@@ -219,9 +242,10 @@ export class SettingsPanel {
 
     private async _handleDeleteProfile(webview: vscode.Webview, name: unknown): Promise<void> {
         if (typeof name !== 'string') return;
-        const profiles = ConfigManager.getProfiles().filter((p) => p.name !== name);
-        await ConfigManager.saveProfiles(profiles);
-        await webview.postMessage({ command: 'profilesSaved', profiles });
+        const updated = ConfigManager.updateProfiles((profiles) =>
+            profiles.some((p) => p.name === name) ? profiles.filter((p) => p.name !== name) : undefined
+        );
+        await webview.postMessage({ command: 'profilesSaved', profiles: updated ?? ConfigManager.getProfiles() });
     }
 
     private async _handlePickFilePath(message: PickFilePathMessage): Promise<unknown> {
@@ -236,19 +260,14 @@ export class SettingsPanel {
         if (!result || result.length === 0) {
             return { command: 'filePathPicked', path: null };
         }
-        const chosen = result[0].fsPath;
-        if (workspaceRoot) {
-            const rel = path.relative(workspaceRoot, chosen);
-            if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
-                return { command: 'filePathPicked', path: rel };
-            }
-        }
-        return { command: 'filePathPicked', path: chosen };
+        // Portable across hosts: `~/…` under the home directory, absolute
+        // otherwise. (Workspace-relative paths mean nothing to the CLI.)
+        return { command: 'filePathPicked', path: abbreviateHome(result[0].fsPath) };
     }
 
     private _resolveDefaultUri(currentValue: unknown, workspaceRoot?: string): vscode.Uri | undefined {
         if (typeof currentValue === 'string' && currentValue.trim()) {
-            const value = currentValue.trim();
+            const value = expandHome(currentValue.trim());
             const absolute = path.isAbsolute(value)
                 ? path.resolve(value)
                 : workspaceRoot ? path.resolve(workspaceRoot, value) : undefined;
@@ -448,6 +467,7 @@ code {
 const SETTINGS_BODY = `
 <header class="ns-app-header">
     <h1 class="ns-title">Neon Sync Settings</h1>
+    <p class="ns-hint" id="configPath" hidden></p>
 </header>
 
 <section class="ns-card" data-section="connection">
@@ -566,6 +586,7 @@ const SETTINGS_SCRIPT = `
         connInput: $('connectionString'),
         connToggle: $('toggleConnVisibility'),
         connStatus: $('connectionStatus'),
+        configPath: $('configPath'),
         connClearRow: $('connectionClearRow'),
         connClearBtn: $('clearConnBtn'),
         connKeepBtn: $('keepConnBtn'),
@@ -915,6 +936,13 @@ const SETTINGS_SCRIPT = `
                 hideClearConfirm();
                 setConnectionStatus('', '');
                 renderProfiles(msg.profiles || []);
+                if (msg.configFallback) {
+                    els.configPath.textContent = "Showing this editor's own profiles, read-only: " + msg.configFallback + '. Profiles normally live in ' + msg.configPath + '.';
+                    els.configPath.hidden = false;
+                } else if (msg.configPath) {
+                    els.configPath.textContent = 'Profiles are stored in ' + msg.configPath + ', shared with the neon-sync CLI and your other editors.';
+                    els.configPath.hidden = false;
+                }
                 break;
             case 'connectionStringSaved':
                 state.connectionLoaded = typeof msg.url === 'string' ? msg.url : els.connInput.value;

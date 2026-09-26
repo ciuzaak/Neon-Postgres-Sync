@@ -59,9 +59,21 @@ export class StaleRemoteError extends Error {
  * query path must call this before building SQL.
  */
 export function assertValidTableName(tableName: string): void {
-    if (!PROFILE_TABLENAME_RE.test(tableName)) {
-        throw new Error(`Invalid table name: "${tableName}". Only letters, numbers, and underscores are allowed.`);
+    // (RegExp.test would turn a missing name into the valid "undefined".)
+    if (typeof tableName !== 'string' || !PROFILE_TABLENAME_RE.test(tableName)) {
+        throw new Error(`Invalid table name: "${tableName}". Only letters, numbers, and underscores, optionally schema.table.`);
     }
+}
+
+/**
+ * `tableName` as SQL: validated, then each part double-quoted in lower case.
+ * That is exactly the relation the unquoted name resolves to (Postgres folds
+ * unquoted identifiers to lower case), and it also works for reserved words
+ * such as `user`.
+ */
+export function sqlTableName(tableName: string): string {
+    assertValidTableName(tableName);
+    return tableName.split('.').map((part) => `"${part.toLowerCase()}"`).join('.');
 }
 
 function isRecord(value: unknown): value is QueryRow {
@@ -119,7 +131,7 @@ function parseFetchedRow(row: QueryRow | undefined): FetchedRecord {
  * has no verbatim text; `::text` is its canonical form.
  */
 function selectQuery(tableName: string): string {
-    return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
+    return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${sqlTableName(tableName)} WHERE ${ID_COLUMN} = $1`;
 }
 
 /**
@@ -137,11 +149,11 @@ function selectQuery(tableName: string): string {
  */
 function conditionalWriteQuery(tableName: string, expectExists: boolean): string {
     const write = expectExists
-        ? `UPDATE ${tableName}
+        ? `UPDATE ${sqlTableName(tableName)}
                SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
                WHERE ${ID_COLUMN} = $1 AND ${VERSION_EXPR} IS NOT DISTINCT FROM $3
                RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`
-        : `INSERT INTO ${tableName} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
+        : `INSERT INTO ${sqlTableName(tableName)} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
                VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                ON CONFLICT (${ID_COLUMN}) DO NOTHING
                RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`;
@@ -218,6 +230,48 @@ export class RecordStore {
             this.sqlClient = neon(this.connectionString);
         }
         return this.sqlClient;
+    }
+
+    /**
+     * Create the sync table with the documented schema if nothing by that
+     * name exists. If something does, check it's usable: a table (not a view
+     * or index) with the four columns and a text-like `data` column.
+     */
+    async createTable(tableName: string): Promise<{ created: boolean; problem?: string }> {
+        const qualified = sqlTableName(tableName);
+        const found = parseQueryRows(await this.sql.query(
+            `SELECT c.relkind::text AS kind,
+                    (SELECT json_object_agg(a.attname, format_type(a.atttypid, a.atttypmod))
+                       FROM pg_attribute a
+                      WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) AS columns
+               FROM pg_class c WHERE c.oid = to_regclass($1)`,
+            [qualified]
+        ))[0];
+        if (!found) {
+            await this.sql.query(
+                `CREATE TABLE IF NOT EXISTS ${qualified} (` +
+                `${ID_COLUMN} TEXT PRIMARY KEY, ${DATA_COLUMN} TEXT, ${CREATE_TIME_COLUMN} TIMESTAMP, ${UPDATE_TIME_COLUMN} TIMESTAMP)`,
+                []
+            );
+            return { created: true };
+        }
+        const kinds: Record<string, string> = { v: 'a view', m: 'a materialized view', i: 'an index', S: 'a sequence', f: 'a foreign table', c: 'a composite type' };
+        if (found.kind !== 'r' && found.kind !== 'p') {
+            return { created: false, problem: `it is ${kinds[String(found.kind)] ?? 'not a table'}` };
+        }
+        const raw = found.columns;
+        const columns = (typeof raw === 'string' ? JSON.parse(raw) : raw ?? {}) as Record<string, string>;
+        const missing = [ID_COLUMN, DATA_COLUMN, CREATE_TIME_COLUMN, UPDATE_TIME_COLUMN].filter((c) => !(c in columns));
+        if (missing.length > 0) return { created: false, problem: `it has no ${missing.join(', ')} column${missing.length > 1 ? 's' : ''}` };
+        if (!/^(text|character varying.*|json|jsonb)$/.test(columns[DATA_COLUMN])) {
+            return { created: false, problem: `its data column is ${columns[DATA_COLUMN]}, not text` };
+        }
+        return { created: false };
+    }
+
+    /** One round trip (`SELECT 1`): checks the URL, credentials and network. */
+    async ping(): Promise<void> {
+        parseQueryRows(await this.sql.query('SELECT 1 AS ok', []));
     }
 
     async fetch(profile: Profile): Promise<FetchedRecord> {

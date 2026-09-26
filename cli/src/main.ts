@@ -1,0 +1,216 @@
+import { parseArgs } from 'util';
+import { ConfigFileReadError, ConfigLockedError } from '../../src/core/configFile';
+import { applyCommand, type ApplyMode } from './commands/apply';
+import { configCommand } from './commands/config';
+import { diffCommand } from './commands/diff';
+import { editCommand } from './commands/edit';
+import { initDbCommand } from './commands/initDb';
+import { profileCommand } from './commands/profile';
+import { statusCommand, type Ui } from './commands/status';
+import { CliContext, EXIT, ExitCode, UsageError } from './context';
+import { Host } from './host';
+import { KeychainUnavailableError, redactSecrets } from './secrets';
+import { ASCII, asciiByDefault, colorEnabled, makeStyle, UNICODE } from './ui/format';
+
+declare const __NEON_SYNC_VERSION__: string | undefined;
+export const VERSION = typeof __NEON_SYNC_VERSION__ === 'string' ? __NEON_SYNC_VERSION__ : '0.0.0-dev';
+
+export const HELP = `neon-sync — sync local config files with a Neon Postgres table
+
+Usage:
+  neon-sync                         status of every profile (then offers to apply)
+  neon-sync status [names…]         what's out of sync (--json)
+  neon-sync sync [names…]           apply what's safe; ask about the rest
+      --prefer local|remote         decide the named profiles' conflicts (needs names)
+  neon-sync pull <names…|--all>     download (Local ← Remote)
+  neon-sync push <names…|--all>     upload (Remote ← Local)
+      --force --yes                 overwrite a side with its own changes, unattended
+                                    (in a terminal you're asked per row instead)
+    sync, pull and push also take:
+      -y, --yes                     don't ask: apply only what's safe, skip the rest
+      --dry-run                     show what would be written
+      --json                        machine-readable report (with --yes or --dry-run)
+  neon-sync diff <name>             what would change (--direction upload|download)
+  neon-sync edit <name>             edit what will be written in $VISUAL/$EDITOR
+                                    (--direction upload|download, --tool code)
+  neon-sync profile list | show <name> | rename <old> <new>
+  neon-sync profile remove <name>   (--yes when not in a terminal)
+  neon-sync profile add [name] --file <path> --id <id> [--table t] [--exclude key]…
+  neon-sync init-db [--table <name>] create the table (default json_records)
+  neon-sync config path | set-url | clear-url | test
+  neon-sync help                    this help
+
+Options:
+  --json            machine-readable output
+  --base <dir>      resolve relative profile paths against <dir>
+  --config <file>   use another profiles file
+  --no-color        plain output (also: NO_COLOR, TERM=dumb)
+  --ascii           ASCII symbols only
+  -h, --help        this help
+  -v, --version     print the version
+
+Profile names must be exact, except in a terminal without --yes/--json,
+where a unique prefix is enough (not for \`profile remove\`/\`rename\`).
+
+Exit codes: 0 in sync / done · 1 pending or needs a decision · 2 usage or
+configuration error · 3 apply or runtime failure · 4 rows that can't sync
+until fixed. (Precedence: 3 > 4 > 1 > 0.)
+
+Profiles are shared with the VS Code extension; \`neon-sync config path\` shows
+where. Database URL: NEON_SYNC_DATABASE_URL, else the OS keychain.
+`;
+
+const OPTIONS = {
+    json: { type: 'boolean' },
+    yes: { type: 'boolean', short: 'y' },
+    force: { type: 'boolean' },
+    'dry-run': { type: 'boolean' },
+    all: { type: 'boolean' },
+    prefer: { type: 'string' },
+    direction: { type: 'string' },
+    tool: { type: 'string' },
+    file: { type: 'string' },
+    id: { type: 'string' },
+    table: { type: 'string' },
+    exclude: { type: 'string', multiple: true },
+    base: { type: 'string' },
+    config: { type: 'string' },
+    'no-color': { type: 'boolean' },
+    ascii: { type: 'boolean' },
+    help: { type: 'boolean', short: 'h' },
+    version: { type: 'boolean', short: 'v' }
+} as const;
+
+/** Flags each command accepts (beyond the global ones). */
+const COMMAND_FLAGS: Record<string, string[]> = {
+    status: ['json'],
+    sync: ['json', 'yes', 'prefer', 'dry-run'],
+    pull: ['json', 'yes', 'force', 'dry-run', 'all'],
+    push: ['json', 'yes', 'force', 'dry-run', 'all'],
+    diff: ['direction'],
+    edit: ['direction', 'tool'],
+    profile: ['json', 'yes', 'file', 'id', 'table', 'exclude'],
+    'init-db': ['table'],
+    config: []
+};
+const GLOBAL_FLAGS = ['base', 'config', 'no-color', 'ascii', 'help', 'version'];
+
+/** Run the CLI; returns the exit code (never calls process.exit). */
+export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
+    let running: string | undefined; // the command, for error messages
+    try {
+        let parsed;
+        try {
+            parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+        } catch (e) {
+            const message = (e as Error).message;
+            const unknown = /Unknown option '([^']+)'/.exec(message);
+            throw new UsageError(`${unknown ? `Unknown option ${unknown[1]}` : message.replace(/\.$/, '')}. See \`neon-sync --help\`.`);
+        }
+        const { values, positionals } = parsed;
+        if (values.version) {
+            ctx.stdout.write(`${VERSION}\n`);
+            return EXIT.ok;
+        }
+        if (values.help) {
+            ctx.stdout.write(HELP);
+            return EXIT.ok;
+        }
+
+        if (positionals[0] === 'help') {
+            ctx.stdout.write(HELP);
+            return EXIT.ok;
+        }
+        const [command = 'status', ...args] = positionals;
+        running = command;
+        const accepted = Object.prototype.hasOwnProperty.call(COMMAND_FLAGS, command) ? COMMAND_FLAGS[command] : undefined;
+        if (!accepted) {
+            throw new UsageError(
+                `Unknown command "${command}". Profile names go after a command, e.g. \`neon-sync status ${command}\`. See \`neon-sync --help\`.`
+            );
+        }
+        for (const flag of Object.keys(values)) {
+            if (!GLOBAL_FLAGS.includes(flag) && !accepted.includes(flag)) {
+                throw new UsageError(positionals.length === 0
+                    ? `\`neon-sync\` on its own shows status, which doesn't take --${flag}. See \`neon-sync --help\`.`
+                    : `\`${command}\` doesn't take --${flag}.`);
+            }
+        }
+
+        const json = !!values.json;
+        const ui: Ui = {
+            style: makeStyle(!json && colorEnabled(ctx.stdout.isTTY, ctx.env, !!values['no-color'])),
+            sym: values.ascii || asciiByDefault(ctx.pathEnv.platform, ctx.env) ? ASCII : UNICODE
+        };
+        const host = new Host(ctx, { base: values.base, config: values.config });
+        const interactive = ctx.stdinIsTTY && ctx.stdout.isTTY && !json;
+
+        switch (command) {
+            case 'status': {
+                const found = { actionable: 0 };
+                const code = await statusCommand(ctx, host, args, { json, allowPrefix: interactive }, ui, found);
+                // Bare `neon-sync` in a terminal: offer to go straight on (also when some rows are stuck).
+                if (positionals.length === 0 && interactive && found.actionable > 0) {
+                    if (await ctx.prompts.confirm('Review and apply now?')) {
+                        return await applyCommand(ctx, host, 'sync', [], {
+                            yes: false, force: false, dryRun: false, json: false, all: false, interactive: true, allowPrefix: true
+                        }, ui);
+                    }
+                }
+                return code;
+            }
+            case 'sync':
+            case 'pull':
+            case 'push': {
+                const yes = !!values.yes;
+                return await applyCommand(ctx, host, command as ApplyMode, args, {
+                    yes,
+                    force: !!values.force,
+                    dryRun: !!values['dry-run'],
+                    json,
+                    all: !!values.all,
+                    prefer: values.prefer,
+                    interactive: interactive && !yes && !values['dry-run'],
+                    allowPrefix: interactive && !yes
+                }, ui);
+            }
+            case 'diff':
+                return await diffCommand(ctx, host, args, { direction: values.direction, allowPrefix: interactive }, ui);
+            case 'profile':
+                return await profileCommand(ctx, host, args, {
+                    given: Object.keys(values).filter((f) => !GLOBAL_FLAGS.includes(f)),
+                    json,
+                    yes: !!values.yes,
+                    file: values.file,
+                    id: values.id,
+                    table: values.table,
+                    exclude: values.exclude
+                }, ui);
+            case 'edit':
+                return await editCommand(ctx, host, args, { direction: values.direction, tool: values.tool }, ui);
+            case 'init-db':
+                return await initDbCommand(ctx, host, args, { table: values.table }, ui);
+            case 'config':
+                return await configCommand(ctx, host, args, ui);
+        }
+        throw new UsageError(`Unknown command "${command}".`);
+    } catch (e) {
+        // Never print credentials: drivers quote rejected URLs verbatim.
+        const message = redactSecrets(e instanceof Error ? e.message : String(e));
+        if (e instanceof UsageError || e instanceof KeychainUnavailableError || e instanceof ConfigFileReadError) {
+            ctx.stderr.write(`neon-sync: ${message}\n`);
+            return EXIT.usage;
+        }
+        // A held config lock is temporary ("try again"): a runtime failure, not a config error.
+        // The driver's "Error connecting to database: TypeError: fetch failed" reads
+        // as "error: Error …" and doesn't say what to check.
+        const unreachable = /^Error connecting to database: (.*)$/s.exec(message);
+        if (unreachable) {
+            const check = running === 'config' ? 'the URL' : 'the URL (`neon-sync config test`)';
+            ctx.stderr.write(`neon-sync: couldn't reach the database (${unreachable[1]}). Check your network and ${check}.\n`);
+            return EXIT.failure;
+        }
+        ctx.stderr.write(`neon-sync: ${e instanceof ConfigLockedError ? '' : 'error: '}${message}\n`);
+        return EXIT.failure;
+    }
+}

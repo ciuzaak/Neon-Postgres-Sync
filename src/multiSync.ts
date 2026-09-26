@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConfigManager, Profile } from './config';
 import { SyncManager } from './sync';
-import { createSyncEngine, sharedFileClashes } from './hostEngine';
+import { createSyncEngine, syncBlockers } from './hostEngine';
 import type { ApplyOutcome, ApplyRequest } from './core/engine';
 import { candidateFor, computeDiffStats, SyncPlan } from './core/plan';
 import type { SyncDirection } from './core/types';
@@ -84,8 +84,8 @@ export class MultiSyncManager {
             if (profile) selected.push(profile);
         }
 
-        // Skip only the profiles that share a file; the rest can still sync.
-        const clashes = sharedFileClashes(selected);
+        // Skip only the blocked profiles (shared file, WSL boundary); the rest can still sync.
+        const clashes = syncBlockers(selected);
         if (clashes.size > 0) {
             vscode.window.showWarningMessage(`Skipped ${[...clashes.keys()].join(', ')}: ${[...new Set(clashes.values())].join(' ')}`);
         }

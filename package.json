@@ -115,12 +115,18 @@
     "compile": "tsc -p ./",
     "compile:test": "tsc -p ./tsconfig.test.json",
     "test": "npm run compile && npm run compile:test && node --test \"out-test/test/**/*.test.js\"",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "build:cli": "node cli/build.mjs"
   },
   "devDependencies": {
+    "@clack/prompts": "^1.8.1",
     "@electric-sql/pglite": "^0.5.8",
+    "@napi-rs/keyring": "^2.1.0",
     "@types/node": "18.x",
     "@types/vscode": "^1.80.0",
+    "diff": "^9.0.0",
+    "esbuild": "^0.28.2",
+    "picocolors": "^1.1.1",
     "typescript": "^5.1.3"
   },
   "dependencies": {

@@ -3,7 +3,7 @@ import assert = require('node:assert/strict');
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ConfigFileReadError, ConfigFileStore } from '../../src/core/configFile';
+import { ConfigFileReadError, ConfigFileStore, ConfigLockedError } from '../../src/core/configFile';
 import type { ConfigFile } from '../../src/core/types';
 
 function tempConfigPath(): string {
@@ -67,4 +67,80 @@ test('ensureExists creates the file and parent directory once', () => {
     assert.equal(store.ensureExists({ profiles: [] }), true);
     assert.equal(store.ensureExists({ profiles: [{ name: 'ignored' } as never] }), false);
     assert.deepEqual(store.read(), { profiles: [] });
+});
+
+// ── update under the lock ──────────────────────────────────────────────
+
+test('update applies the change to a fresh read, so interleaved writers both land', () => {
+    const filePath = tempConfigPath();
+    const a = new ConfigFileStore(filePath);
+    const b = new ConfigFileStore(filePath);
+    a.saveProfiles([{ name: 'one', filePath: '~/1', id: '1', tableName: 't' }]);
+
+    // b "loaded" before a's second write, but its update runs on a fresh read.
+    a.update((c) => ({ ...c, profiles: [...c.profiles, { name: 'two', filePath: '~/2', id: '2', tableName: 't' }] }));
+    b.update((c) => ({ ...c, profiles: [...c.profiles, { name: 'three', filePath: '~/3', id: '3', tableName: 't' }] }));
+
+    assert.deepEqual(a.read()!.profiles.map((p) => p.name), ['one', 'two', 'three']);
+});
+
+test('update returning undefined writes nothing; missing file starts empty and is created 0700', () => {
+    const filePath = path.join(path.dirname(tempConfigPath()), 'new', 'neon-sync.json');
+    const store = new ConfigFileStore(filePath);
+
+    assert.equal(store.update(() => undefined), undefined);
+    assert.equal(fs.existsSync(filePath), false);
+    store.update((c) => c);
+    assert.deepEqual(store.read(), { profiles: [] });
+    if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
+    }
+});
+
+test('update refuses a corrupt file (never treats it as empty) and leaves it untouched', () => {
+    const filePath = tempConfigPath();
+    fs.writeFileSync(filePath, '{ "profiles": [ oops');
+    const store = new ConfigFileStore(filePath);
+
+    assert.throws(() => store.saveProfiles([]), ConfigFileReadError);
+    assert.equal(fs.readFileSync(filePath, 'utf-8'), '{ "profiles": [ oops');
+    fs.writeFileSync(filePath, '{"profiles": {"not": "an array"}}');
+    assert.throws(() => store.read(), ConfigFileReadError);
+});
+
+test('update waits for a held lock and fails with ConfigLockedError after the wait', () => {
+    const filePath = tempConfigPath();
+    const store = new ConfigFileStore(filePath, { lockWaitMs: 100 });
+    fs.mkdirSync(`${filePath}.lock`);
+
+    assert.throws(() => store.saveProfiles([]), ConfigLockedError);
+    fs.rmdirSync(`${filePath}.lock`);
+    store.saveProfiles([]);
+    assert.equal(fs.existsSync(`${filePath}.lock`), false, 'lock released after a write');
+});
+
+test('a stale lock (crashed writer) is taken over', () => {
+    const filePath = tempConfigPath();
+    const lock = `${filePath}.lock`;
+    fs.mkdirSync(lock);
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(lock, old, old);
+
+    new ConfigFileStore(filePath, { lockWaitMs: 100 }).saveProfiles([]);
+
+    assert.deepEqual(new ConfigFileStore(filePath).read(), { profiles: [] });
+});
+
+test('a symlinked config (dotfiles manager) stays a symlink after a write', { skip: process.platform === 'win32' }, () => {
+    const dir = path.dirname(tempConfigPath());
+    const real = path.join(dir, 'dotfiles', 'neon-sync.json');
+    fs.mkdirSync(path.dirname(real));
+    fs.writeFileSync(real, '{"profiles": []}');
+    const link = path.join(dir, 'neon-sync.json');
+    fs.symlinkSync(real, link);
+
+    new ConfigFileStore(link).saveProfiles([{ name: 'a', filePath: '~/a', id: 'a', tableName: 't' }]);
+
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+    assert.equal(JSON.parse(fs.readFileSync(real, 'utf-8')).profiles[0].name, 'a');
 });

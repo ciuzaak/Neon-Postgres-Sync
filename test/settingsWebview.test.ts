@@ -3,11 +3,13 @@ import assert = require('node:assert/strict');
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as vm from 'node:vm';
 import {
     createMockWebviewPanel,
     installModuleMocks,
     purgeProjectModules,
     resetMocks,
+    testLocations,
     type MockWebviewPanel
 } from './helpers/moduleMocks';
 import { PROFILE_TABLENAME_REGEX_SOURCE } from '../src/core/profileValidation';
@@ -50,7 +52,7 @@ function setupPanel() {
             store: async (key: string, value: string) => { secrets.set(key, value); },
             delete: async (key: string) => { secrets.delete(key); }
         }
-    } as never);
+    } as never, testLocations(storagePath));
     const panel = createMockWebviewPanel();
     vscode.__pendingWebviewPanel = panel;
     SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
@@ -149,9 +151,10 @@ test('deleteProfile removes the profile and replies with the new list', async ()
     assert.deepEqual(profiles.map((p) => p.name), ['b']);
 });
 
-test('pickFilePath returns workspace-relative path when the choice is inside the workspace', async () => {
+test('pickFilePath returns a ~/ path for a file under the home directory, even inside the workspace', async () => {
     const { vscode, panel } = setupPanel();
-    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-ws-'));
+    const home = os.homedir(); // an isolated temp home in tests (see moduleMocks)
+    const workspaceRoot = fs.mkdtempSync(path.join(home, 'ws-'));
     const chosen = path.join(workspaceRoot, 'subdir', 'file.json');
     vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot) }];
     vscode.window.showOpenDialog = async () => [{ fsPath: chosen }];
@@ -160,7 +163,20 @@ test('pickFilePath returns workspace-relative path when the choice is inside the
 
     const reply = findReply(panel, 'filePathPicked');
     assert.ok(reply);
-    assert.equal(reply!.path, path.join('subdir', 'file.json'));
+    assert.equal(reply!.path, `~/${path.relative(home, chosen).split(path.sep).join('/')}`);
+});
+
+test('pickFilePath expands ~ in the current value for the dialog default', async () => {
+    const { vscode, panel } = setupPanel();
+    let defaultUri: { fsPath: string } | undefined;
+    vscode.window.showOpenDialog = async (options?: unknown) => {
+        defaultUri = (options as { defaultUri?: { fsPath: string } }).defaultUri;
+        return undefined;
+    };
+
+    await deliver(panel, { command: 'pickFilePath', currentValue: '~/cfg/settings.json' });
+
+    assert.equal(defaultUri?.fsPath, path.join(os.homedir(), 'cfg', 'settings.json'));
 });
 
 test('pickFilePath returns absolute path when the choice is outside the workspace', async () => {
@@ -256,6 +272,19 @@ test('saveProfile rejects renaming to a name that collides with another profile'
     // Make sure no profile was overwritten.
     const persisted = ConfigManager.getProfiles();
     assert.equal(persisted.find((p) => p.name === 'a')?.filePath, 'a.json');
+});
+
+test('the rendered webview script parses (it lives in a template literal, where escapes are easy to lose)', () => {
+    const { vscode } = resetMocks();
+    const { SettingsPanel } = loadModules();
+    const panel = createMockWebviewPanel();
+    vscode.__pendingWebviewPanel = panel;
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
+
+    const scripts = [...panel.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.equal(scripts.length, 1);
+    // Compile only: a syntax error anywhere kills the whole panel.
+    assert.doesNotThrow(() => new vm.Script(scripts[0]));
 });
 
 test('rendered HTML embeds the same regex source as the host-side validator', () => {
@@ -368,4 +397,21 @@ test('rendered HTML applies a CSP meta tag and a nonce to inline script and styl
     assert.ok(html.includes(`<style nonce="${nonce}">`), 'expected style tag with matching nonce');
     assert.ok(html.includes(`<script nonce="${nonce}">`), 'expected script tag with matching nonce');
     assert.ok(csp.includes(`default-src 'none'`), 'expected default-src none in CSP');
+});
+
+test('editing a profile renamed or removed elsewhere meanwhile reports it instead of re-adding it', async () => {
+    const { ConfigManager, panel } = setupPanel();
+    await ConfigManager.saveProfiles([{ name: 'alpha', filePath: '~/a.json', id: 'a', tableName: 'records' }]);
+    // The CLI renames it after the panel loaded.
+    await ConfigManager.saveProfiles([{ name: 'alpha-renamed', filePath: '~/a.json', id: 'a', tableName: 'records' }]);
+
+    await deliver(panel, {
+        command: 'saveProfile',
+        originalName: 'alpha',
+        profile: { name: 'alpha', filePath: '~/a.json', id: 'a2', tableName: 'records' }
+    });
+
+    const reply = findReply(panel, 'profileSaveError');
+    assert.match(String(reply?.formError), /"alpha" was renamed or removed elsewhere/);
+    assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['alpha-renamed']);
 });
