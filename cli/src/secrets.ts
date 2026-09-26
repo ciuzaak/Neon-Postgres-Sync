@@ -5,7 +5,8 @@ const ACCOUNT = 'database-url';
 /** The OS keychain couldn't be used; never fall back to plaintext. */
 export class KeychainUnavailableError extends Error {
     constructor(cause: unknown) {
-        super(`the OS keychain is unavailable (${cause instanceof Error ? cause.message : String(cause)}); set ${URL_ENV} instead`);
+        // First line only: a failed require appends its multi-line require stack.
+        super(`the OS keychain is unavailable (${(cause instanceof Error ? cause.message : String(cause)).split('\n')[0]}); set ${URL_ENV} instead`);
         this.name = 'KeychainUnavailableError';
     }
 }

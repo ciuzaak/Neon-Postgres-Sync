@@ -20,7 +20,6 @@ export function worstExit(...codes: ExitCode[]): ExitCode {
     return EXIT.ok;
 }
 
-/** Thrown for bad arguments or configuration: printed without a stack, exit 2. */
 /**
  * `word` as a shell argument, for commands we suggest: bare when it's
  * obviously safe, else quoted for the platform's usual shell.
@@ -30,6 +29,7 @@ export function shellArg(word: string, platform: NodeJS.Platform): string {
     return platform === 'win32' ? `"${word.replace(/"/g, '""')}"` : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Thrown for bad arguments or configuration: printed without a stack, exit 2. */
 export class UsageError extends Error {
     constructor(message: string) {
         super(message);

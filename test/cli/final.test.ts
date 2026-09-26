@@ -190,3 +190,22 @@ test('piping into a reader that stops early (| head) ends quietly', { skip: proc
     assert.equal(stderr, '');
     assert.equal(code, 141);
 });
+
+test('round 2: help takes any trailing words; config test does not suggest itself; profile list caps the path column', async () => {
+    const f = await cliFixture({ profiles: [profile('a', { filePath: '/' + 'very-long-directory-name/'.repeat(6) + 'x.json' }), profile('b')] });
+    assert.match((await f.run(['help', 'status'])).stdout, /^neon-sync — sync/);
+    f.pg.sql.transaction = async () => { throw new Error('Error connecting to database: TypeError: fetch failed'); };
+    f.pg.sql.query = f.pg.sql.transaction as never;
+    const t = await f.run(['config', 'test']);
+    assert.equal(t.code, 3);
+    assert.doesNotMatch(t.stderr, /config test/);
+    const lines = (await f.run(['profile', 'list'])).stdout.trimEnd().split('\n');
+    assert.ok(lines.every((l) => l.length < 90), lines.join('\n'));
+    assert.equal(lines[0].indexOf('records/'), lines[1].indexOf('records/'));
+});
+
+test('round 2: a missing keychain module is reported on one line', () => {
+    const { KeychainUnavailableError } = require('../../cli/src/secrets') as typeof import('../../cli/src/secrets');
+    const e = new KeychainUnavailableError(new Error("Cannot find module '@napi-rs/keyring'\nRequire stack:\n- /x/neon-sync.cjs"));
+    assert.equal(e.message, "the OS keychain is unavailable (Cannot find module '@napi-rs/keyring'); set NEON_SYNC_DATABASE_URL instead");
+});

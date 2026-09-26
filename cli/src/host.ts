@@ -187,7 +187,7 @@ export class Host {
             try {
                 assertValidTableName(p.tableName);
             } catch (e) {
-                throw new UsageError(`Profile "${p.name}": ${(e as Error).message}`);
+                throw new UsageError(`Profile "${p.name}" in ${this.display(this.configPath())}: ${(e as Error).message}`);
             }
         }
         const { url } = await this.connection();

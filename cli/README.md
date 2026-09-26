@@ -105,7 +105,7 @@ esac
 | 3 | A sync failed (changed meanwhile, database or network error) |
 | 4 | A profile can't sync until something is fixed (e.g. a relative path, two profiles on one file) |
 
-When several apply: 3 beats 4 beats 1 beats 0.
+When several apply: 3 beats 4 beats 1 beats 0. (If a reader such as `head` closes the pipe early, neon-sync stops quietly with 141, like any command killed by SIGPIPE.)
 
 ## Where things live
 

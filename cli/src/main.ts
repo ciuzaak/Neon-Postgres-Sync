@@ -97,6 +97,7 @@ const GLOBAL_FLAGS = ['base', 'config', 'no-color', 'ascii', 'help', 'version'];
 
 /** Run the CLI; returns the exit code (never calls process.exit). */
 export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
+    let running: string | undefined; // the command, for error messages
     try {
         let parsed;
         try {
@@ -116,11 +117,12 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
             return EXIT.ok;
         }
 
-        if (positionals.length === 1 && positionals[0] === 'help') {
+        if (positionals[0] === 'help') {
             ctx.stdout.write(HELP);
             return EXIT.ok;
         }
         const [command = 'status', ...args] = positionals;
+        running = command;
         const accepted = Object.prototype.hasOwnProperty.call(COMMAND_FLAGS, command) ? COMMAND_FLAGS[command] : undefined;
         if (!accepted) {
             throw new UsageError(
@@ -204,7 +206,8 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         // as "error: Error …" and doesn't say what to check.
         const unreachable = /^Error connecting to database: (.*)$/s.exec(message);
         if (unreachable) {
-            ctx.stderr.write(`neon-sync: couldn't reach the database (${unreachable[1]}). Check your network and the URL (\`neon-sync config test\`).\n`);
+            const check = running === 'config' ? 'the URL' : 'the URL (`neon-sync config test`)';
+            ctx.stderr.write(`neon-sync: couldn't reach the database (${unreachable[1]}). Check your network and ${check}.\n`);
             return EXIT.failure;
         }
         ctx.stderr.write(`neon-sync: ${e instanceof ConfigLockedError ? '' : 'error: '}${message}\n`);

@@ -61,7 +61,7 @@ export class StaleRemoteError extends Error {
 export function assertValidTableName(tableName: string): void {
     // (RegExp.test would turn a missing name into the valid "undefined".)
     if (typeof tableName !== 'string' || !PROFILE_TABLENAME_RE.test(tableName)) {
-        throw new Error(`Invalid table name: "${tableName}". Only letters, numbers, and underscores are allowed.`);
+        throw new Error(`Invalid table name: "${tableName}". Only letters, numbers, and underscores, optionally schema.table.`);
     }
 }
 

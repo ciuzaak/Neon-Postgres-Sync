@@ -7,7 +7,7 @@ import { hasErrors, validateProfileForm } from '../../../src/core/profileValidat
 import type { Profile } from '../../../src/core/types';
 import { CliContext, EXIT, ExitCode, shellArg, UsageError } from '../context';
 import { Host } from '../host';
-import { pad } from '../ui/format';
+import { pad, truncateMiddle } from '../ui/format';
 import { DEFAULT_TABLE } from './initDb';
 import type { Ui } from './status';
 
@@ -54,11 +54,11 @@ export async function profileCommand(
                 return EXIT.ok;
             }
             const nameW = Math.max(...profiles.map((p) => p.name.length));
-            const pathW = Math.max(...profiles.map((p) => p.filePath.length));
+            const pathW = Math.min(48, Math.max(...profiles.map((p) => p.filePath.length)));
             for (const p of profiles) {
                 const excluded = p.excludeKeys?.length ? ui.style.dim(`  excludes ${p.excludeKeys.join(', ')}`) : '';
                 ctx.stdout.write(
-                    `  ${pad(p.name, nameW)}  ${pad(p.filePath, pathW)}  ${ui.style.dim(`${p.tableName}/${p.id}`)}${excluded}\n`
+                    `  ${pad(p.name, nameW)}  ${pad(truncateMiddle(p.filePath, pathW, ui.sym.ellipsis), pathW)}  ${ui.style.dim(`${p.tableName}/${p.id}`)}${excluded}\n`
                 );
             }
             return EXIT.ok;
