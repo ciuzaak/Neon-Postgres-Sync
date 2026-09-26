@@ -253,7 +253,6 @@ function report(
     const codes: ExitCode[] = [];
     const json: Array<Record<string, unknown>> = [];
     const lines: string[] = [];
-    const verb = (d: SyncDirection) => (d === 'upload' ? 'uploaded' : 'downloaded');
 
     for (const d of decisions) {
         const name = d.row.profile.name;
@@ -273,43 +272,10 @@ function report(
             lines.push(`  ${arrow}  ${name}  ${style.dim(`would ${d.direction}`)}`);
             continue;
         }
-        const o = outcomes.get(d.row)!;
-        switch (o.kind) {
-            case 'ok':
-                codes.push(EXIT.ok);
-                json.push({ name, kind: 'applied', direction: d.direction, ...(o.baselineError ? { baselineError: o.baselineError } : {}) });
-                lines.push(`  ${arrow}  ${name}  ${verb(d.direction)}` + (o.baselineError
-                    ? style.yellow(` (couldn't record sync history: ${o.baselineError} — the next sync may ask about this profile)`)
-                    : ''));
-                break;
-            case 'stale-remote':
-            case 'not-applied':
-                codes.push(EXIT.failure);
-                json.push({ name, kind: o.kind, direction: d.direction });
-                lines.push(`  ${style.red(sym.error)}  ${name}  ${o.kind === 'stale-remote'
-                    ? 'the remote changed meanwhile — nothing written; re-run'
-                    : 'not applied — another row in the batch was stale; re-run'}`);
-                break;
-            case 'stale-local':
-                codes.push(EXIT.failure);
-                json.push({ name, kind: o.kind, direction: d.direction, remoteCommitted: o.remoteCommitted });
-                lines.push(`  ${style.red(sym.error)}  ${name}  ${o.remoteCommitted
-                    ? 'remote saved, but the local file changed meanwhile and was not overwritten; re-run'
-                    : 'the local file changed meanwhile — nothing written; re-run'}`);
-                break;
-            case 'merge-error':
-                codes.push(EXIT.failure);
-                json.push({ name, kind: o.kind, direction: d.direction, error: o.error.message });
-                lines.push(`  ${style.red(sym.error)}  ${name}  ${o.error.message}`);
-                break;
-            case 'local-write-failed':
-                codes.push(EXIT.failure);
-                json.push({ name, kind: o.kind, direction: d.direction, remoteCommitted: o.remoteCommitted, error: o.error });
-                lines.push(`  ${style.red(sym.error)}  ${name}  ${o.remoteCommitted
-                    ? `remote saved, but writing the local file failed (${o.error}); re-run to rewrite it`
-                    : `writing the local file failed: ${o.error}`}`);
-                break;
-        }
+        const described = describeOutcome(outcomes.get(d.row)!, d.direction, ui);
+        codes.push(described.code);
+        json.push({ name, ...described.json });
+        lines.push(`  ${described.mark}  ${name}  ${described.text}`);
     }
 
     const code = worstExit(...codes);
@@ -326,4 +292,49 @@ function report(
         ctx.stdout.write(style.dim('\nNothing was written: add --yes to apply (or run in a terminal to choose).\n'));
     }
     return code;
+}
+
+/** One applied row's outcome as an exit code, a report line and its JSON. */
+export function describeOutcome(
+    o: ApplyOutcome,
+    direction: SyncDirection,
+    ui: Ui
+): { code: ExitCode; mark: string; text: string; json: Record<string, unknown> } {
+    const { style, sym } = ui;
+    const fail = style.red(sym.error);
+    switch (o.kind) {
+        case 'ok':
+            return {
+                code: EXIT.ok,
+                mark: style.cyan(direction === 'upload' ? sym.upload : sym.download),
+                text: (direction === 'upload' ? 'uploaded' : 'downloaded') + (o.baselineError
+                    ? style.yellow(` (couldn't record sync history: ${o.baselineError} — the next sync may ask about this profile)`)
+                    : ''),
+                json: { kind: 'applied', direction, ...(o.baselineError ? { baselineError: o.baselineError } : {}) }
+            };
+        case 'stale-remote':
+            return { code: EXIT.failure, mark: fail, text: 'the remote changed meanwhile — nothing written; re-run', json: { kind: o.kind, direction } };
+        case 'not-applied':
+            return { code: EXIT.failure, mark: fail, text: 'not applied — another row in the batch was stale; re-run', json: { kind: o.kind, direction } };
+        case 'stale-local':
+            return {
+                code: EXIT.failure,
+                mark: fail,
+                text: o.remoteCommitted
+                    ? 'remote saved, but the local file changed meanwhile and was not overwritten; re-run'
+                    : 'the local file changed meanwhile — nothing written; re-run',
+                json: { kind: o.kind, direction, remoteCommitted: o.remoteCommitted }
+            };
+        case 'merge-error':
+            return { code: EXIT.failure, mark: fail, text: o.error.message, json: { kind: o.kind, direction, error: o.error.message } };
+        case 'local-write-failed':
+            return {
+                code: EXIT.failure,
+                mark: fail,
+                text: o.remoteCommitted
+                    ? `remote saved, but writing the local file failed (${o.error}); re-run to rewrite it`
+                    : `writing the local file failed: ${o.error}`,
+                json: { kind: o.kind, direction, remoteCommitted: o.remoteCommitted, error: o.error }
+            };
+    }
 }

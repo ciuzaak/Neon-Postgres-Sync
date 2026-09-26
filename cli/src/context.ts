@@ -46,12 +46,18 @@ export interface CliContext {
     stdinIsTTY: boolean;
     readStdin(): Promise<string>;
     env: Record<string, string | undefined>;
+    /** Working directory: relative paths typed on the command line resolve against it. */
+    cwd: string;
     pathEnv: PathEnv;
     keychain: Keychain;
     createStore(url: string): RecordStore;
     prompts: Prompter;
     /** Show long text through a pager; returns false if none could run (caller prints it). */
     page(text: string): boolean;
+    /** Run an editor command and wait for it; resolves with its exit code. */
+    runEditor(command: string, args: string[]): Promise<number>;
+    /** Wall clock, injectable so tests can simulate an editor that returns instantly. */
+    now(): number;
 }
 
 export interface Choice<T extends string> {
@@ -65,6 +71,7 @@ export interface Prompter {
     password(message: string): Promise<string | undefined>;
     confirm(message: string): Promise<boolean | undefined>;
     select<T extends string>(message: string, choices: Choice<T>[]): Promise<T | undefined>;
+    text(message: string, opts?: { initial?: string; placeholder?: string; validate?: (value: string) => string | undefined }): Promise<string | undefined>;
     multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[]): Promise<T[] | undefined>;
 }
 
@@ -84,11 +91,21 @@ export function defaultContext(): CliContext {
             return Buffer.concat(chunks).toString('utf-8');
         },
         env: process.env,
+        cwd: process.cwd(),
         pathEnv: currentPathEnv(),
         keychain: new OsKeychain(),
         createStore: (url) => new RecordStore(url),
         prompts: clackPrompter(),
-        page: (text) => runPager(text, process.env)
+        page: (text) => runPager(text, process.env),
+        runEditor: (command, args) => new Promise((resolve, reject) => {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { spawn } = require('child_process') as typeof import('child_process');
+            // Windows editors are often .cmd shims (code.cmd), which need a shell.
+            const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+            child.on('error', reject);
+            child.on('exit', (code) => resolve(code ?? 1));
+        }),
+        now: () => Date.now()
     };
 }
 
@@ -112,6 +129,15 @@ function clackPrompter(): Prompter {
         },
         async confirm(message) {
             const value = await clack().confirm({ message });
+            return clack().isCancel(value) ? undefined : value;
+        },
+        async text(message, opts = {}) {
+            const value = await clack().text({
+                message,
+                initialValue: opts.initial,
+                placeholder: opts.placeholder,
+                validate: opts.validate ? (v) => opts.validate!(v ?? '') : undefined
+            });
             return clack().isCancel(value) ? undefined : value;
         },
         async select(message, choices) {

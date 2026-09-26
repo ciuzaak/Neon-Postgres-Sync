@@ -3,6 +3,8 @@ import { ConfigLockedError } from '../../src/core/configFile';
 import { applyCommand, type ApplyMode } from './commands/apply';
 import { configCommand } from './commands/config';
 import { diffCommand } from './commands/diff';
+import { editCommand } from './commands/edit';
+import { initDbCommand } from './commands/initDb';
 import { profileCommand } from './commands/profile';
 import { statusCommand, type Ui } from './commands/status';
 import { CliContext, EXIT, ExitCode, UsageError } from './context';
@@ -25,7 +27,10 @@ Usage:
   neon-sync pull <names…|--all>     download (Local ← Remote); --force to overwrite changes
   neon-sync push <names…|--all>     upload (Remote ← Local);   --force to overwrite changes
   neon-sync diff <name>             what would change (--direction upload|download)
-  neon-sync profile list | show <name>
+  neon-sync edit <name>             edit what will be written, in $EDITOR (--tool code)
+  neon-sync profile list | show <name> | remove <name> | rename <old> <new>
+  neon-sync profile add [name] --file <path> --id <id> [--table t] [--exclude key]…
+  neon-sync init-db [--table <name>]  create the table (default json_records)
   neon-sync config path | set-url | clear-url | test
 
 Options:
@@ -53,6 +58,11 @@ const OPTIONS = {
     all: { type: 'boolean' },
     prefer: { type: 'string' },
     direction: { type: 'string' },
+    tool: { type: 'string' },
+    file: { type: 'string' },
+    id: { type: 'string' },
+    table: { type: 'string' },
+    exclude: { type: 'string', multiple: true },
     base: { type: 'string' },
     config: { type: 'string' },
     'no-color': { type: 'boolean' },
@@ -68,7 +78,9 @@ const COMMAND_FLAGS: Record<string, string[]> = {
     pull: ['json', 'yes', 'force', 'dry-run', 'all'],
     push: ['json', 'yes', 'force', 'dry-run', 'all'],
     diff: ['direction'],
-    profile: ['json'],
+    edit: ['direction', 'tool'],
+    profile: ['json', 'yes', 'file', 'id', 'table', 'exclude'],
+    'init-db': ['table'],
     config: []
 };
 const GLOBAL_FLAGS = ['base', 'config', 'no-color', 'ascii', 'help', 'version'];
@@ -147,7 +159,18 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
             case 'diff':
                 return await diffCommand(ctx, host, args, { direction: values.direction, allowPrefix: interactive }, ui);
             case 'profile':
-                return await profileCommand(ctx, host, args, { json }, ui);
+                return await profileCommand(ctx, host, args, {
+                    json,
+                    yes: !!values.yes,
+                    file: values.file,
+                    id: values.id,
+                    table: values.table,
+                    exclude: values.exclude
+                }, ui);
+            case 'edit':
+                return await editCommand(ctx, host, args, { direction: values.direction, tool: values.tool }, ui);
+            case 'init-db':
+                return await initDbCommand(ctx, host, args, { table: values.table }, ui);
             case 'config':
                 return await configCommand(ctx, host, args, ui);
         }

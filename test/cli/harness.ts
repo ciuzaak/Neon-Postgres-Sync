@@ -20,7 +20,8 @@ export interface CliFixture {
     configPath: string;
     pg: Awaited<ReturnType<typeof createPgliteSql>>;
     keychain: Keychain & { value?: string };
-    run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter>; columns?: number }): Promise<RunResult>;
+    run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter>; columns?: number;
+        editor?: (command: string, args: string[]) => Promise<number>; now?: () => number }): Promise<RunResult>;
     file(p: string): string;
     writeFile(p: string, content: string, mtime?: Date): void;
     remote(id: string): Promise<string | undefined>;
@@ -70,6 +71,7 @@ export async function cliFixture(opts: {
                 stdinIsTTY: tty,
                 readStdin: async () => runOpts.stdin ?? '',
                 env: { ...(runOpts.env ?? {}) },
+                cwd: home,
                 pathEnv: { platform: process.platform, home, env: {} },
                 keychain,
                 createStore: (url) => {
@@ -81,9 +83,12 @@ export async function cliFixture(opts: {
                     confirm: async () => undefined,
                     select: async () => undefined,
                     multiselect: async () => undefined,
+                    text: async () => undefined,
                     ...runOpts.prompts
                 } as Prompter,
-                page: () => false
+                page: () => false,
+                runEditor: runOpts.editor ?? (async () => { throw new Error('no editor in tests'); }),
+                now: runOpts.now ?? (() => Date.now())
             };
             const code = await main(argv, ctx);
             return { code, stdout, stderr };

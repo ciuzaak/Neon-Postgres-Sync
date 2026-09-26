@@ -220,6 +220,22 @@ export class RecordStore {
         return this.sqlClient;
     }
 
+    /**
+     * Create the sync table with the documented schema if it doesn't exist.
+     * Returns true if it was created (false: it already existed).
+     */
+    async createTable(tableName: string): Promise<boolean> {
+        assertValidTableName(tableName);
+        const exists = parseQueryRows(await this.sql.query('SELECT to_regclass($1) IS NOT NULL AS exists', [tableName]));
+        if (exists[0]?.exists === true) return false;
+        await this.sql.query(
+            `CREATE TABLE IF NOT EXISTS ${tableName} (` +
+            `${ID_COLUMN} TEXT PRIMARY KEY, ${DATA_COLUMN} TEXT, ${CREATE_TIME_COLUMN} TIMESTAMP, ${UPDATE_TIME_COLUMN} TIMESTAMP)`,
+            []
+        );
+        return true;
+    }
+
     /** One round trip (`SELECT 1`): checks the URL, credentials and network. */
     async ping(): Promise<void> {
         parseQueryRows(await this.sql.query('SELECT 1 AS ok', []));
