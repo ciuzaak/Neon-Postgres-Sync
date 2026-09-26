@@ -517,3 +517,21 @@ test('concurrent `profile add` from separate processes: every profile lands (con
     const names = JSON.parse(fs.readFileSync(f.configPath, 'utf-8')).profiles.map((p: { name: string }) => p.name).sort();
     assert.deepEqual(names, ['p0', 'p1', 'p2', 'p3', 'p4', 'p5']);
 });
+
+// ── final review ──────────────────────────────────────────────────────
+
+test('table names are quoted: a reserved word works, and mixed case still means the lower-case table', async () => {
+    const f = await cliFixture();
+    assert.match((await f.run(['init-db', '--table', 'user'])).stdout, /Created table user/);
+    assert.match((await f.run(['init-db', '--table', 'Records'])).stdout, /already exists/, 'Records is records, as when unquoted');
+    assert.match((await f.run(['init-db', '--table', 'public.USER'])).stdout, /already exists/);
+
+    f.writeFile('~/u.json', '{"a": 1}\n');
+    f.writeFile('~/r.json', '{"b": 2}\n');
+    assert.equal((await f.run(['profile', 'add', 'u', '--file', '~/u.json', '--id', 'u', '--table', 'user'])).code, 0);
+    assert.equal((await f.run(['profile', 'add', 'r', '--file', '~/r.json', '--id', 'r', '--table', 'Records'])).code, 0);
+    assert.equal((await f.run(['push', 'u', 'r', '--yes'])).code, 0);
+    assert.equal((await f.pg.db.query<{ data: string }>(`SELECT data FROM "user" WHERE id = 'u'`)).rows[0].data, '{"a": 1}\n');
+    assert.equal((await f.pg.db.query<{ data: string }>(`SELECT data FROM records WHERE id = 'r'`)).rows[0].data, '{"b": 2}\n');
+    assert.equal((await f.run(['status'])).code, 0);
+});

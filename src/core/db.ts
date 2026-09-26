@@ -64,6 +64,17 @@ export function assertValidTableName(tableName: string): void {
     }
 }
 
+/**
+ * `tableName` as SQL: validated, then each part double-quoted in lower case.
+ * That is exactly the relation the unquoted name resolves to (Postgres folds
+ * unquoted identifiers to lower case), and it also works for reserved words
+ * such as `user`.
+ */
+export function sqlTableName(tableName: string): string {
+    assertValidTableName(tableName);
+    return tableName.split('.').map((part) => `"${part.toLowerCase()}"`).join('.');
+}
+
 function isRecord(value: unknown): value is QueryRow {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -119,7 +130,7 @@ function parseFetchedRow(row: QueryRow | undefined): FetchedRecord {
  * has no verbatim text; `::text` is its canonical form.
  */
 function selectQuery(tableName: string): string {
-    return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${tableName} WHERE ${ID_COLUMN} = $1`;
+    return `SELECT ${DATA_COLUMN}::text AS ${DATA_COLUMN}, ${UPDATE_TIME_COLUMN}, ${VERSION_EXPR} AS ${VERSION_ALIAS} FROM ${sqlTableName(tableName)} WHERE ${ID_COLUMN} = $1`;
 }
 
 /**
@@ -137,11 +148,11 @@ function selectQuery(tableName: string): string {
  */
 function conditionalWriteQuery(tableName: string, expectExists: boolean): string {
     const write = expectExists
-        ? `UPDATE ${tableName}
+        ? `UPDATE ${sqlTableName(tableName)}
                SET ${DATA_COLUMN} = $2, ${UPDATE_TIME_COLUMN} = CURRENT_TIMESTAMP
                WHERE ${ID_COLUMN} = $1 AND ${VERSION_EXPR} IS NOT DISTINCT FROM $3
                RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`
-        : `INSERT INTO ${tableName} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
+        : `INSERT INTO ${sqlTableName(tableName)} (${ID_COLUMN}, ${DATA_COLUMN}, ${CREATE_TIME_COLUMN}, ${UPDATE_TIME_COLUMN})
                VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                ON CONFLICT (${ID_COLUMN}) DO NOTHING
                RETURNING ${VERSION_EXPR} AS ${VERSION_ALIAS}, ${DATA_COLUMN}::text AS ${STORED_ALIAS}`;
@@ -226,18 +237,18 @@ export class RecordStore {
      * or index) with the four columns and a text-like `data` column.
      */
     async createTable(tableName: string): Promise<{ created: boolean; problem?: string }> {
-        assertValidTableName(tableName);
+        const qualified = sqlTableName(tableName);
         const found = parseQueryRows(await this.sql.query(
             `SELECT c.relkind::text AS kind,
                     (SELECT json_object_agg(a.attname, format_type(a.atttypid, a.atttypmod))
                        FROM pg_attribute a
                       WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) AS columns
                FROM pg_class c WHERE c.oid = to_regclass($1)`,
-            [tableName]
+            [qualified]
         ))[0];
         if (!found) {
             await this.sql.query(
-                `CREATE TABLE IF NOT EXISTS ${tableName} (` +
+                `CREATE TABLE IF NOT EXISTS ${qualified} (` +
                 `${ID_COLUMN} TEXT PRIMARY KEY, ${DATA_COLUMN} TEXT, ${CREATE_TIME_COLUMN} TIMESTAMP, ${UPDATE_TIME_COLUMN} TIMESTAMP)`,
                 []
             );
