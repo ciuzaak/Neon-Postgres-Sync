@@ -206,6 +206,37 @@ function findAllValues(root: jsoncParser.Node, path: KeyPath): jsoncParser.Node[
     return nodes;
 }
 
+/**
+ * The concrete key paths in `root` that a written path matches. Each dot in
+ * the written path either separates levels or belongs to a key name, so
+ * `editor.fontSize` matches the flat key `"editor.fontSize"` (as VS Code
+ * writes settings) as well as `fontSize` nested in `editor`. Only keys that
+ * exist are followed, through every duplicate, so this stays small however
+ * many dots a path has.
+ */
+function concretePaths(root: jsoncParser.Node | undefined, written: KeyPath): KeyPath[] {
+    const found = new Map<string, KeyPath>();
+    const walk = (node: jsoncParser.Node, rest: KeyPath, prefix: string[]): void => {
+        if (node.type !== 'object') return;
+        for (let take = 1; take <= rest.length; take++) {
+            const key = rest.slice(0, take).join('.');
+            const props = propertiesNamed(node, key);
+            if (props.length === 0) continue;
+            const path = [...prefix, key];
+            if (take === rest.length) {
+                found.set(path.join('\x00'), path);
+            } else {
+                for (const p of props) {
+                    const value = p.children?.[1];
+                    if (value) walk(value, rest.slice(take), path);
+                }
+            }
+        }
+    };
+    if (root) walk(root, written, []);
+    return [...found.values()];
+}
+
 /** Delete [start, end) — widened to whole lines when it has its line(s) to itself. */
 function spanOrLinesEdit(text: string, start: number, end: number): jsoncParser.Edit {
     const lineEnd = lineContentEndOf(text, end);
@@ -364,7 +395,8 @@ function setRawValue(text: string, path: KeyPath, rawValue: string): string {
 }
 
 /**
- * Returns `text` with every key at the given paths removed. Comments and
+ * Returns `text` with every key at the given paths removed — in every form
+ * the text has it, flat or nested (see concretePaths). Comments and
  * formatting on remaining keys are preserved. No-op when a path does not exist
  * in the input. Paths are processed deepest-first so that removing an outer
  * node does not invalidate positions still pointing inside it.
@@ -372,7 +404,8 @@ function setRawValue(text: string, path: KeyPath, rawValue: string): string {
 export function stripKeys(text: string, paths: ReadonlyArray<KeyPath>): string {
     if (paths.length === 0) return text;
 
-    const ordered = [...paths].sort((a, b) => b.length - a.length);
+    const tree = jsoncParser.parseTree(text, [], PARSE_OPTIONS);
+    const ordered = unique(paths.flatMap((p) => concretePaths(tree, p))).sort((a, b) => b.length - a.length);
     let current = text;
     for (const path of ordered) {
         current = removeProperty(current, path);
@@ -382,9 +415,10 @@ export function stripKeys(text: string, paths: ReadonlyArray<KeyPath>): string {
 
 /**
  * Returns `candidateText` with every path's value reset to whatever
- * `destinationOriginal` holds at that same path:
- *   - destination has path → set candidate at path to destination's value
- *   - destination missing path → remove path from candidate (if present)
+ * `destinationOriginal` holds at that same path, for each concrete form
+ * (flat or nested, see concretePaths) either text has:
+ *   - destination has it → set candidate there to destination's value
+ *   - destination doesn't → remove it from candidate (if present)
  *
  * Comments/formatting elsewhere in candidateText are preserved. Intermediate
  * objects are created in candidate as needed (jsonc-parser modify default).
@@ -399,8 +433,13 @@ export function mergeBack(
     if (paths.length === 0) return candidateText;
 
     const destTree = jsoncParser.parseTree(destinationOriginal, [], PARSE_OPTIONS);
+    const candidateTree = jsoncParser.parseTree(candidateText, [], PARSE_OPTIONS);
 
-    const ordered = [...paths].sort((a, b) => b.length - a.length);
+    // Every concrete form either side has (flat "a.b" or nested a → b):
+    // each gets the destination's value, or is removed where the destination
+    // has none — so each side keeps its own keys in its own shape.
+    const concrete = paths.flatMap((p) => [...concretePaths(destTree, p), ...concretePaths(candidateTree, p)]);
+    const ordered = unique(concrete).sort((a, b) => b.length - a.length);
     let current = candidateText;
     for (const path of ordered) {
         const destNode = destTree ? findValue(destTree, path) : undefined;
@@ -416,6 +455,12 @@ export function mergeBack(
         current = setRawValue(current, path, rawValue);
     }
     return current;
+}
+
+function unique(paths: ReadonlyArray<KeyPath>): KeyPath[] {
+    const seen = new Map<string, KeyPath>();
+    for (const p of paths) seen.set(p.join('\x00'), p);
+    return [...seen.values()];
 }
 
 // v1 supports only dot-separated literal key names. Wildcards (`*`) and array

@@ -2,6 +2,10 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
+## [Unreleased]
+### Added
+- **Flat Dotted Keys in `excludeKeys`**: `editor.fontSize` now also matches VS Code's flat `"editor.fontSize"` setting (a dot in a path can be a level separator or part of a key name, whichever the file has); previously such keys couldn't be excluded at all. Each side keeps its own values in its own form. After upgrading, a profile whose `excludeKeys` contain a dot is handled once as if its `excludeKeys` had changed (like a first sync on that machine: nothing happens if both sides already match; otherwise the CLI asks and the extension picks the newer side for you to confirm), since those keys may now filter more than when it was last synced.
+
 ## [0.8.0] - 2026-09-26
 ### Added
 - **`neon-sync` CLI** (new npm package `@ciuzaakwong/neon-sync`, [cli/README.md](cli/README.md)): the same sync from the terminal — `status`, `sync`, `pull`, `push`, `diff`, `edit`, profile management, `init-db` — sharing profiles and sync history with the extension. Applies only changes whose direction is known to be safe (conflicts, syncs without history where both sides exist, deletions and large deletions are always asked about), `--yes`/`--json` for scripts, and exit codes for cron.

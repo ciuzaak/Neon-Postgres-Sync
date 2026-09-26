@@ -215,3 +215,18 @@ test('round 3: "excludeKeys": null is treated as absent, like the engine does', 
     const f = await cliFixture({ configRaw: JSON.stringify({ profiles: [{ ...profile('a'), excludeKeys: null }] }) });
     assert.equal((await f.run(['profile', 'list'])).code, 0);
 });
+
+test('--exclude editor.fontSize keeps a flat VS Code setting per machine, end to end', async () => {
+    const f = await cliFixture({ profiles: [profile('code', { excludeKeys: ['editor.fontSize'] })] });
+    f.writeFile('~/code.json', '{\n  "editor.fontSize": 14,\n  "files.eol": "\\n"\n}\n');
+    await f.setRemote('code-id', '{\n  "editor.fontSize": 20,\n  "files.eol": "\\r\\n"\n}\n');
+
+    const push = await f.run(['push', 'code', '--yes', '--force']);
+    assert.equal(push.code, 0, push.stdout + push.stderr);
+    assert.deepEqual(JSON.parse((await f.remote('code-id'))!), { 'editor.fontSize': 20, 'files.eol': '\n' }, 'the remote keeps its own font size');
+
+    // Only the excluded key differs now, and changing it locally is not a change.
+    f.writeFile('~/code.json', '{\n  "editor.fontSize": 16,\n  "files.eol": "\\n"\n}\n');
+    const s = JSON.parse((await f.run(['status', '--json'])).stdout).profiles[0];
+    assert.equal(s.status, 'in-sync', JSON.stringify(s));
+});

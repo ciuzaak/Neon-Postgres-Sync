@@ -129,12 +129,11 @@ Add `excludeKeys` to a profile (via the settings panel's Add/Edit modal → Adva
 }
 ```
 
-Path syntax (v1):
+Path syntax:
 
-- Dot-separated string. `a.b.c` addresses `{ "a": { "b": { "c": ... } } }`.
-- **Keys whose own name contains a dot can't be excluded yet.** This includes VS Code–style settings files, which use flat keys like `"editor.fontSize"`: `editor.fontSize` would look for `{"editor": {"fontSize": …}}` and exclude nothing.
+- Dot-separated string. A dot either separates levels or is part of a key name, whichever the file has: `editor.fontSize` matches VS Code's flat `{ "editor.fontSize": 14 }` as well as `{ "editor": { "fontSize": 14 } }`, and `a.b.c` also matches `{ "a.b": { "c": … } }` and so on. Only whole key names match (`editor.font` doesn't match `editor.fontSize`). If a file has several forms, all of them are excluded, and each side keeps its own values in its own form.
 - Multiple paths supported; multi-level paths supported.
-- Wildcards (`a.*.b`), array indices, and keys containing literal dots are not supported in this release.
+- Wildcards (`a.*.b`), array indices and language-specific blocks such as `[json]` are not supported yet.
 
 Behavior:
 

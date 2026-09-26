@@ -77,7 +77,7 @@ neon-sync profile add app --file ~/.config/app/settings.json --id app-settings \
     --exclude theme --exclude window.zoom
 ```
 
-`--exclude` hides JSON/JSONC keys from syncing: each machine keeps its own value (themes, zoom levels, machine IDs). A dot means nesting — `window.zoom` is the key `zoom` inside the object `window`. Keys whose own name contains a dot (like VS Code's flat `"editor.fontSize"`) can't be excluded yet.
+`--exclude` hides JSON/JSONC keys from syncing: each machine keeps its own value (themes, zoom levels, machine IDs). A dot matches either nesting or a dot in the key name, whichever the file has: `--exclude editor.fontSize` covers VS Code's flat `"editor.fontSize"` as well as `{"editor": {"fontSize": …}}`.
 
 A relative `--file` is resolved against the current directory (or `--base <dir>`), and paths are stored as `~/…` so the same profile works on every machine with the same layout. Each profile needs its own file and its own record.
 

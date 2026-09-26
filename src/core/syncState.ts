@@ -35,14 +35,24 @@ export function hashProjection(projection: string): string {
     return crypto.createHash('sha256').update(projection, 'utf8').digest('hex');
 }
 
-/** Order-insensitive: the same set of paths always yields the same fingerprint. */
+/**
+ * Order-insensitive: the same set of paths always yields the same fingerprint.
+ *
+ * Paths with a dot also match flat keys such as `"editor.fontSize"` (added
+ * after 0.8.0, see jsoncFilter concretePaths), so the same paths can now strip more
+ * than when an older baseline was taken: those sets hash with a version
+ * marker, so such a baseline no longer applies and the next sync is handled
+ * as "excludeKeys changed" rather than as a misleading "both changed".
+ * Single-key sets match exactly as before and keep their fingerprint.
+ */
 export function filterFingerprint(excludeKeys: ReadonlyArray<KeyPath>): string {
     const normalized = excludeKeys.map((p) => [...p]).sort((a, b) => {
         const ka = JSON.stringify(a);
         const kb = JSON.stringify(b);
         return ka < kb ? -1 : ka > kb ? 1 : 0;
     });
-    return hashProjection(JSON.stringify(normalized));
+    const matchesFlatKeys = normalized.some((p) => p.length > 1);
+    return hashProjection(JSON.stringify(matchesFlatKeys ? { flatKeys: 1, paths: normalized } : normalized));
 }
 
 /**

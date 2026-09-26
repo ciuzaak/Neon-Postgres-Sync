@@ -369,3 +369,53 @@ test('parsePaths rejects lines using v1-unsupported wildcard or array-index synt
         [['valid', 'key']]
     );
 });
+
+// ── flat dotted keys ("editor.fontSize", as VS Code writes settings) ──
+
+test('stripKeys matches a flat dotted key, keeping comments and neighbours', () => {
+    const text = '{\n  // font\n  "editor.fontSize": 14, // mine\n  "editor.tabSize": 2\n}\n';
+    assert.equal(stripKeys(text, parsePaths(['editor.fontSize'])), '{\n  // font\n  "editor.tabSize": 2\n}\n');
+});
+
+test('a written path matches every flat/nested split that exists, and only whole keys', () => {
+    const text = JSON.stringify({ 'a.b.c': 1, a: { 'b.c': 2, b: { c: 3, cd: 9 } }, 'a.b': { c: 4 }, 'a.bc': 5, keep: 0 });
+    const out = JSON.parse(stripKeys(text, parsePaths(['a.b.c'])));
+    assert.deepEqual(out, { a: { b: { cd: 9 } }, 'a.b': {}, 'a.bc': 5, keep: 0 });
+    // A prefix of a key name is not a match.
+    assert.equal(stripKeys('{"editor.fontSize": 1}', parsePaths(['editor.font'])), '{"editor.fontSize": 1}');
+});
+
+test('stripKeys removes every duplicate of a flat key', () => {
+    assert.deepEqual(JSON.parse(stripKeys('{"a.b": 1, "x": 0, "a.b": 2}', parsePaths(['a.b']))), { x: 0 });
+});
+
+test('mergeBack restores a flat key flat (not as a nested object)', () => {
+    const dest = '{\n  "editor.fontSize": 14,\n  "x": 1\n}\n';
+    const candidate = '{\n  "x": 2\n}\n';
+    const out = mergeBack(candidate, dest, parsePaths(['editor.fontSize']));
+    assert.deepEqual(JSON.parse(out), { x: 2, 'editor.fontSize': 14 });
+    assert.ok(!/"editor"\s*:/.test(out), out);
+});
+
+test('mergeBack gives each concrete form the destination\'s value, removing forms the destination lacks', () => {
+    // Candidate (the incoming side) writes it flat; this machine has it nested.
+    const dest = '{\n  "editor": { "fontSize": 14, "other": 1 },\n  "x": 1\n}\n';
+    const candidate = '{\n  "editor.fontSize": 20,\n  "editor": { "other": 2 },\n  "x": 2\n}\n';
+    const out = mergeBack(candidate, dest, parsePaths(['editor.fontSize']));
+    assert.deepEqual(JSON.parse(out), { editor: { other: 2, fontSize: 14 }, x: 2 });
+});
+
+test('mergeBack removes a flat key the destination does not have', () => {
+    const out = mergeBack('{"editor.fontSize": 20, "x": 2}', '{"x": 1}', parsePaths(['editor.fontSize']));
+    assert.deepEqual(JSON.parse(out), { x: 2 });
+});
+
+test('strip → merge round trip with flat keys reproduces the destination\'s own values', () => {
+    const local = '{\n  "editor.fontSize": 14, // this machine\n  "workbench.colorTheme": "Dark",\n  "files.eol": "\\n"\n}\n';
+    const remote = '{\n  "editor.fontSize": 20,\n  "workbench.colorTheme": "Light",\n  "files.eol": "\\r\\n"\n}\n';
+    const paths = parsePaths(['editor.fontSize', 'workbench.colorTheme']);
+    // Download: take the remote, keep this machine's excluded values.
+    const merged = mergeBack(remote, local, paths);
+    assert.deepEqual(JSON.parse(merged), { 'editor.fontSize': 14, 'workbench.colorTheme': 'Dark', 'files.eol': '\r\n' });
+    assert.equal(stripKeys(merged, paths), stripKeys(remote, paths));
+});
