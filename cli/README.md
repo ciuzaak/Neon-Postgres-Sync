@@ -7,10 +7,10 @@ $ neon-sync
 
  neon-sync · 4 profiles · ep-cool-rain-123.neon.tech/neondb · ~/.config/neon-sync/neon-sync.json
 
-  ✓  vscode-settings  ~/Library/Application Support/Code/User/settings.json  in sync
-  ↓  antigravity      ~/.gemini/antigravity/settings.json                   remote changed   +12 −3
-  ↑  zsh              ~/.zshrc                                              local changed    +2 −0
-  ⚠  env              ~/projects/app/.env                                   both changed     decide
+  ✓  vscode-settings  ~/.config/Code/User/settings.json    in sync
+  ↓  antigravity      ~/.gemini/antigravity/settings.json  remote changed  +12 −3
+  ↑  zsh              ~/.zshrc                             local changed   +2 −0
+  ⚠  env              ~/projects/app/.env                  both changed    decide
 
   2 ready to apply · 1 needs a decision
   Run `neon-sync sync` to review and apply.
@@ -22,7 +22,7 @@ $ neon-sync
 npm install -g neon-sync
 ```
 
-Node.js 20 or newer. (Or run it without installing: `npx neon-sync`.)
+Node.js 20.12 or newer. (Or run it without installing: `npx neon-sync`.)
 
 ## Quick start
 
@@ -33,7 +33,7 @@ neon-sync profile add zsh --file ~/.zshrc --id zshrc
 neon-sync                     # what's out of sync — then offers to apply it
 ```
 
-Already using the VS Code extension? Its profiles are picked up automatically (after the extension has run once with this version) — just set the URL.
+Already using the VS Code extension? Its profiles are picked up automatically once an extension version with shared profiles (the release after 0.7.0) has run on that machine — just set the URL.
 
 ## How it decides what to do
 
@@ -44,7 +44,7 @@ After every sync, each machine records what both sides looked like. Next time, e
 | only the local file changed | uploads it |
 | only the remote record changed | downloads it |
 | both changed | **asks you** (conflict) |
-| no sync history on this machine yet | **asks you** (timestamps are only a guess) |
+| no sync history on this machine yet, or the profile's `--exclude` keys changed since | **asks you** (timestamps are only a guess) |
 | one side was deleted since the last sync | **asks you** (restore it, or skip — deletions are never synced) |
 | a change would delete most of the other side | **asks you** (large deletion) |
 | one side doesn't exist yet (first time) | copies the other side over |
@@ -61,14 +61,14 @@ Every write is safe against concurrent changes: if another machine changed the r
 | `neon-sync pull <names…\|--all>` | Download (Local ← Remote). |
 | `neon-sync push <names…\|--all>` | Upload (Remote ← Local). |
 | `neon-sync diff <name>` | Show what would change. `--direction upload\|download`. |
-| `neon-sync edit <name>` | Edit what will be written in `$EDITOR`, then confirm. `--tool code` opens a VS Code diff. |
-| `neon-sync profile list \| show \| add \| remove \| rename` | Manage profiles. |
+| `neon-sync edit <name>` | Edit what will be written in `$VISUAL` / `$EDITOR`, then confirm. `--direction upload\|download` picks the side; `--tool code` opens a VS Code diff. |
+| `neon-sync profile list \| show \| add \| remove \| rename` | Manage profiles. `remove` asks first (`--yes` when not in a terminal). |
 | `neon-sync init-db [--table name]` | Create the sync table (default `json_records`). |
 | `neon-sync config path \| set-url \| clear-url \| test` | Where things live; the database URL. |
 
-Useful flags: `--yes` (don't ask; only safe rows are applied), `--dry-run` (show what would be written), `--prefer local|remote` (decide the named profiles' conflicts: `neon-sync sync env --prefer local --yes`), `--force` (with `pull`/`push`: overwrite a side that has its own changes — asked per row in a terminal, or unattended with `--yes`), `--json`, `--no-color`, `--ascii`.
+Useful flags for `sync`, `pull` and `push`: `-y`/`--yes` (don't ask; only safe rows are applied), `--dry-run` (show what would be written), `--json`. Also `--prefer local|remote` with `sync` (decide the named profiles' conflicts: `neon-sync sync env --prefer local --yes`) and `--force --yes` with `pull`/`push` (overwrite a side that has its own changes, unattended — in a terminal you're asked per row instead). Everywhere: `--no-color` (or `NO_COLOR`, `TERM=dumb`), `--ascii`.
 
-Profile names on the command line must be exact in scripts; in a terminal a unique prefix is enough (`neon-sync diff anti`).
+Profile names must be exact, except interactively — in a terminal, without `--yes` or `--json` — where a unique prefix is enough (`neon-sync diff anti`). `profile remove` and `profile rename` always need the exact name.
 
 ### Profiles
 
@@ -79,7 +79,7 @@ neon-sync profile add app --file ~/.config/app/settings.json --id app-settings \
 
 `--exclude` hides JSON/JSONC keys from syncing: each machine keeps its own value (themes, zoom levels, machine IDs). A dot means nesting — `window.zoom` is the key `zoom` inside the object `window`. Keys whose own name contains a dot (like VS Code's flat `"editor.fontSize"`) can't be excluded yet.
 
-Paths are stored as `~/…` so the same profile works on every machine with the same layout. Each profile needs its own file and its own record.
+A relative `--file` is resolved against the current directory (or `--base <dir>`), and paths are stored as `~/…` so the same profile works on every machine with the same layout. Each profile needs its own file and its own record.
 
 ## Scripts and cron
 

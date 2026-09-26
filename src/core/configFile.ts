@@ -179,7 +179,7 @@ export class ConfigFileStore {
         });
     }
 
-    /** Replace the profile list (other top-level fields kept). */
+    /** Replace the profile list (other top-level fields kept). For edits use update(), which re-reads under the lock. */
     saveProfiles(profiles: Profile[]): void {
         this.update((config) => ({ ...config, profiles }));
     }

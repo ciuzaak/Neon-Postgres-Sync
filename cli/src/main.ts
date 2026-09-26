@@ -1,5 +1,5 @@
 import { parseArgs } from 'util';
-import { ConfigLockedError } from '../../src/core/configFile';
+import { ConfigFileReadError, ConfigLockedError } from '../../src/core/configFile';
 import { applyCommand, type ApplyMode } from './commands/apply';
 import { configCommand } from './commands/config';
 import { diffCommand } from './commands/diff';
@@ -21,35 +21,43 @@ Usage:
   neon-sync                         status of every profile (then offers to apply)
   neon-sync status [names…]         what's out of sync (--json)
   neon-sync sync [names…]           apply what's safe; ask about the rest
-      --yes                         don't ask: apply only what's safe, skip the rest
       --prefer local|remote         decide the named profiles' conflicts (needs names)
-      --dry-run                     show what would be written
   neon-sync pull <names…|--all>     download (Local ← Remote)
   neon-sync push <names…|--all>     upload (Remote ← Local)
-      --force                       overwrite a side with its own changes
-                                    (asked per row; unattended only with --yes)
+      --force --yes                 overwrite a side with its own changes, unattended
+                                    (in a terminal you're asked per row instead)
+    sync, pull and push also take:
+      -y, --yes                     don't ask: apply only what's safe, skip the rest
+      --dry-run                     show what would be written
+      --json                        machine-readable report (with --yes or --dry-run)
   neon-sync diff <name>             what would change (--direction upload|download)
-  neon-sync edit <name>             edit what will be written, in $EDITOR (--tool code)
-  neon-sync profile list | show <name> | remove <name> | rename <old> <new>
+  neon-sync edit <name>             edit what will be written in $VISUAL/$EDITOR
+                                    (--direction upload|download, --tool code)
+  neon-sync profile list | show <name> | rename <old> <new>
+  neon-sync profile remove <name>   (--yes when not in a terminal)
   neon-sync profile add [name] --file <path> --id <id> [--table t] [--exclude key]…
-  neon-sync init-db [--table <name>]  create the table (default json_records)
+  neon-sync init-db [--table <name>] create the table (default json_records)
   neon-sync config path | set-url | clear-url | test
+  neon-sync help                    this help
 
 Options:
   --json            machine-readable output
   --base <dir>      resolve relative profile paths against <dir>
   --config <file>   use another profiles file
-  --no-color        plain output (also: NO_COLOR)
+  --no-color        plain output (also: NO_COLOR, TERM=dumb)
   --ascii           ASCII symbols only
   -h, --help        this help
   -v, --version     print the version
+
+Profile names must be exact, except in a terminal without --yes/--json,
+where a unique prefix is enough (not for \`profile remove\`/\`rename\`).
 
 Exit codes: 0 in sync / done · 1 pending or needs a decision · 2 usage or
 configuration error · 3 apply or runtime failure · 4 rows that can't sync
 until fixed. (Precedence: 3 > 4 > 1 > 0.)
 
-Profiles: ~/.config/neon-sync/neon-sync.json (shared with the VS Code
-extension). Database URL: NEON_SYNC_DATABASE_URL, else the OS keychain.
+Profiles are shared with the VS Code extension; \`neon-sync config path\` shows
+where. Database URL: NEON_SYNC_DATABASE_URL, else the OS keychain.
 `;
 
 const OPTIONS = {
@@ -108,6 +116,10 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
             return EXIT.ok;
         }
 
+        if (positionals.length === 1 && positionals[0] === 'help') {
+            ctx.stdout.write(HELP);
+            return EXIT.ok;
+        }
         const [command = 'status', ...args] = positionals;
         const accepted = Object.prototype.hasOwnProperty.call(COMMAND_FLAGS, command) ? COMMAND_FLAGS[command] : undefined;
         if (!accepted) {
@@ -117,7 +129,9 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         }
         for (const flag of Object.keys(values)) {
             if (!GLOBAL_FLAGS.includes(flag) && !accepted.includes(flag)) {
-                throw new UsageError(`\`${command}\` doesn't take --${flag}.`);
+                throw new UsageError(positionals.length === 0
+                    ? `\`neon-sync\` on its own shows status, which doesn't take --${flag}. See \`neon-sync --help\`.`
+                    : `\`${command}\` doesn't take --${flag}.`);
             }
         }
 
@@ -181,11 +195,18 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
     } catch (e) {
         // Never print credentials: drivers quote rejected URLs verbatim.
         const message = redactSecrets(e instanceof Error ? e.message : String(e));
-        if (e instanceof UsageError || e instanceof KeychainUnavailableError) {
+        if (e instanceof UsageError || e instanceof KeychainUnavailableError || e instanceof ConfigFileReadError) {
             ctx.stderr.write(`neon-sync: ${message}\n`);
             return EXIT.usage;
         }
         // A held config lock is temporary ("try again"): a runtime failure, not a config error.
+        // The driver's "Error connecting to database: TypeError: fetch failed" reads
+        // as "error: Error …" and doesn't say what to check.
+        const unreachable = /^Error connecting to database: (.*)$/s.exec(message);
+        if (unreachable) {
+            ctx.stderr.write(`neon-sync: couldn't reach the database (${unreachable[1]}). Check your network and the URL (\`neon-sync config test\`).\n`);
+            return EXIT.failure;
+        }
         ctx.stderr.write(`neon-sync: ${e instanceof ConfigLockedError ? '' : 'error: '}${message}\n`);
         return EXIT.failure;
     }

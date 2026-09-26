@@ -6,6 +6,7 @@ import { profilesSharingLocalFiles, SyncEngine } from '../../src/core/engine';
 import { realPathOrParent } from '../../src/core/localFile';
 import { abbreviateHome, configDir, expandHome, stateDir, wslBoundaryError } from '../../src/core/paths';
 import { SYNC_STATE_DIRNAME, SyncStateStore } from '../../src/core/syncState';
+import { incompleteProfileReason } from '../../src/core/profileValidation';
 import type { Profile } from '../../src/core/types';
 import { CliContext, UsageError } from './context';
 import { invalidUrlReason, resolveUrl, URL_ENV, UrlSource } from './secrets';
@@ -42,22 +43,40 @@ export class Host {
         return new ConfigFileStore(this.configPath());
     }
 
-    /** All configured profiles. A corrupt config is a configuration error (exit 2). */
+    /**
+     * All configured profiles. A corrupt config, an incomplete profile or a
+     * duplicated name (hand-edited JSON) is a configuration error (exit 2).
+     */
     profiles(): Profile[] {
+        let profiles: unknown[];
         try {
-            return this.configStore().read()?.profiles ?? [];
+            profiles = this.configStore().read()?.profiles ?? [];
         } catch (e) {
             if (e instanceof ConfigFileReadError) throw new UsageError(e.message);
             throw e;
         }
+        const where = this.display(this.configPath());
+        const seen = new Set<string>();
+        profiles.forEach((p, i) => {
+            const reason = incompleteProfileReason(p);
+            if (reason) {
+                const name = typeof (p as Profile)?.name === 'string' ? ` "${(p as Profile).name}"` : '';
+                throw new UsageError(`Profile #${i + 1}${name} in ${where} can't be used (${reason}). Fix or remove it in that file.`);
+            }
+            const { name } = p as Profile;
+            if (seen.has(name)) throw new UsageError(`Two profiles are named "${name}" in ${where}. Rename one in that file.`);
+            seen.add(name);
+        });
+        return profiles as Profile[];
     }
 
     /**
      * Profiles by name; none given = all. Exact names always match; a unique
      * case-insensitive prefix only when `allowPrefix` (interactive use) —
      * scripts must never hit `env-prod` because `env` was deleted.
+     * `exactWhy` explains a failed exact match when prefixes aren't allowed.
      */
-    select(names: string[], allowPrefix: boolean): Profile[] {
+    select(names: string[], allowPrefix: boolean, exactWhy = 'prefixes only work in a terminal, without --yes or --json'): Profile[] {
         const all = this.profiles();
         if (names.length === 0) return all;
         const picked: Profile[] = [];
@@ -71,11 +90,17 @@ export class Host {
                 match = candidates[0];
             }
             if (!match) {
-                throw new UsageError(`No profile named "${name}"${allowPrefix ? '' : ' (scripts need exact names)'}. See \`neon-sync profile list\`.`);
+                throw new UsageError(`No profile named "${name}"${allowPrefix ? '' : ` (${exactWhy})`}. See \`neon-sync profile list\`.`);
             }
             if (!picked.includes(match)) picked.push(match);
         }
         return picked;
+    }
+
+    /** A path typed on this command line: relative to --base if given, else the current directory. */
+    resolveArgument(filePath: string): string {
+        const expanded = expandHome(filePath, this.ctx.pathEnv);
+        return path.resolve(this.opts.base ? expandHome(this.opts.base, this.ctx.pathEnv) : this.ctx.cwd, expanded);
     }
 
     /** Absolute path for a profile, or undefined for a relative path without --base. */
@@ -94,7 +119,7 @@ export class Host {
         const out = new Map<string, { label: string; detail: string }>();
         for (const p of profiles) {
             if (this.resolve(p.filePath) === undefined) {
-                out.set(p.name, { label: 'relative path', detail: 'use ~/… or an absolute path, or pass --base <dir>' });
+                out.set(p.name, { label: 'relative path', detail: 'use a ~/ or absolute path, or pass --base <dir>' });
             }
         }
         const names = new Set(profiles.map((p) => p.name));
@@ -102,7 +127,7 @@ export class Host {
         for (const [a, b] of profilesSharingLocalFiles(resolvable, (f) => this.resolve(f)!)) {
             for (const [self, other] of [[a, b], [b, a]]) {
                 if (names.has(self.name) && !out.has(self.name)) {
-                    out.set(self.name, { label: 'shared file', detail: `same local file as profile "${other.name}" — give each profile its own file` });
+                    out.set(self.name, { label: 'shared file', detail: `same local file as profile "${other.name}"; give each profile its own file` });
                 }
             }
         }
@@ -135,6 +160,12 @@ export class Host {
     /** The URL and its source; read once per run (a keychain read can prompt on macOS). */
     connection(): Promise<{ url: string; source: UrlSource }> {
         this.cachedConnection ??= (async () => {
+            // Set but blank would silently fall back to the keychain: say so instead.
+            // (Empty is the usual way to unset it for one command.)
+            const raw = this.ctx.env[URL_ENV];
+            if (raw !== undefined && raw !== '' && raw.trim() === '') {
+                throw new UsageError(`${URL_ENV} is set but blank. Unset it, or set it to your postgres:// URL.`);
+            }
             const found = await resolveUrl(this.ctx.env, this.ctx.keychain);
             if (!found) {
                 throw new UsageError(`No database URL. Run \`neon-sync config set-url\`, or set ${URL_ENV}.`);

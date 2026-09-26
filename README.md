@@ -71,7 +71,7 @@ If you trigger a sync without a connection string configured, the error toast wi
 
 ### 3. Editing the JSON directly
 
-Profiles live in one per-user file shared by every editor with this extension installed (VS Code, Cursor, …) and by the upcoming `neon-sync` CLI:
+Profiles live in one per-user file shared by every editor with this extension installed (VS Code, Cursor, …) and by the [`neon-sync` CLI](cli/README.md):
 
 | | Profiles | Sync history (per machine) |
 |---|---|---|
@@ -82,7 +82,7 @@ These locations are fixed (environment variables such as `XDG_CONFIG_HOME` are i
 
 **Upgrading:** on first launch, each editor moves its own profiles (previously kept in that editor's private storage) into the shared file. Profiles with the same name keep the shared version, profiles pointing at a file another profile already uses are skipped, and a notification lists what was added. The old per-editor file is kept as a backup (any legacy plaintext connection string is moved into secure storage first). Downgrading the extension afterwards reads that old backup; edits made there are not merged back.
 
-File paths may start with `~/`. Relative paths are resolved against the first workspace folder (the CLI won't accept them), so prefer `~/…` or absolute paths — `Browse…` stores those.
+File paths may start with `~/`. Relative paths are resolved against the first workspace folder (the CLI has no workspace: it only syncs them with `--base <dir>`), so prefer `~/…` or absolute paths — `Browse…` stores those.
 
 Example `neon-sync.json`:
 

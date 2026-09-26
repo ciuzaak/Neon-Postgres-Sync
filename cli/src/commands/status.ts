@@ -77,7 +77,7 @@ export async function statusCommand(
     const { style, sym } = ui;
     const where = rows.some((r) => r.plan) ? ` ${sym.dot} ${describeUrl((await host.connection()).url)}` : '';
     const head = `neon-sync ${sym.dot} ${profiles.length} profile${profiles.length === 1 ? '' : 's'}${where} ${sym.dot} `;
-    const cols = ctx.stdout.columns ?? 100;
+    const cols = ctx.stdout.columns || 100; // 0 from some ptys means unknown
     const configShown = truncateMiddle(host.display(host.configPath()), Math.max(12, cols - 1 - head.length), sym.ellipsis);
     ctx.stdout.write(`\n ${style.bold('neon-sync')}${head.slice('neon-sync'.length)}${style.dim(configShown)}\n\n`);
     if (profiles.length === 0) {
@@ -88,7 +88,7 @@ export async function statusCommand(
     // Layout: symbol, name, path, label, stats. On narrow terminals names and
     // labels are shortened first; the path column is dropped when it would be
     // too narrow to be useful (`profile show` has it in full).
-    const columns = ctx.stdout.columns ?? 100;
+    const columns = cols;
     const shownPath = (p: Profile) => host.display(host.resolve(p.filePath) ?? p.filePath);
     const STATS_W = rows.some((r) => r.cls.kind === 'auto' || r.cls.kind === 'decide') ? 10 : 0;
     const nameW = Math.min(Math.max(...rows.map((r) => r.profile.name.length)), Math.max(10, Math.floor(columns * 0.3)));

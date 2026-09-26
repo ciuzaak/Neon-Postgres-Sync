@@ -32,11 +32,17 @@ const TTY = { tty: true, env: { NO_COLOR: '1', EDITOR: 'fake-editor' } };
 // ── edit ──────────────────────────────────────────────────────────────
 
 test('splitCommand handles arguments and quotes like a shell', () => {
-    assert.deepEqual(splitCommand('code --wait'), ['code', '--wait']);
-    assert.deepEqual(splitCommand(`'/Applications/My Editor.app/bin/ed' -w`), ['/Applications/My Editor.app/bin/ed', '-w']);
-    assert.deepEqual(splitCommand('"C:\\\\Program Files\\\\ed.exe" --x "a \\"b\\""'), ['C:\\Program Files\\ed.exe', '--x', 'a "b"']);
-    assert.deepEqual(splitCommand('vim\\ x  -f'), ['vim x', '-f']);
-    assert.throws(() => splitCommand('code "--wait'), /Unbalanced quote/);
+    assert.deepEqual(splitCommand('code --wait', 'linux'), ['code', '--wait']);
+    assert.deepEqual(splitCommand(`'/Applications/My Editor.app/bin/ed' -w`, 'darwin'), ['/Applications/My Editor.app/bin/ed', '-w']);
+    assert.deepEqual(splitCommand('"C:\\\\Program Files\\\\ed.exe" --x "a \\"b\\""', 'linux'), ['C:\\Program Files\\ed.exe', '--x', 'a "b"']);
+    assert.deepEqual(splitCommand('vim\\ x  -f', 'linux'), ['vim x', '-f']);
+    assert.throws(() => splitCommand('code "--wait', 'linux'), /Unbalanced quote/);
+});
+
+test('splitCommand on Windows: backslashes are path separators, single quotes are ordinary', () => {
+    assert.deepEqual(splitCommand('C:\\tools\\vim\\vim.exe -f', 'win32'), ['C:\\tools\\vim\\vim.exe', '-f']);
+    assert.deepEqual(splitCommand('"C:\\Program Files\\Notepad++\\notepad++.exe" -multiInst', 'win32'), ['C:\\Program Files\\Notepad++\\notepad++.exe', '-multiInst']);
+    assert.deepEqual(splitCommand("C:\\Users\\O'Brien\\ed.exe \"a \\\"b\\\"\"", 'win32'), ["C:\\Users\\O'Brien\\ed.exe", 'a "b"']);
 });
 
 test('edit needs a terminal', async () => {

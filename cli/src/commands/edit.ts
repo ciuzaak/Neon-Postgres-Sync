@@ -41,9 +41,11 @@ function safeExtension(filePath: string): string {
 /**
  * Split an $EDITOR-style command into argv: whitespace separates words;
  * single quotes are literal, double quotes allow \" and \\, a backslash
- * outside quotes escapes the next character.
+ * outside quotes escapes the next character. On Windows backslashes are path
+ * separators (C:\tools\vim.exe) and only double quotes group words.
  */
-export function splitCommand(command: string): string[] {
+export function splitCommand(command: string, platform: NodeJS.Platform = process.platform): string[] {
+    const win = platform === 'win32';
     const out: string[] = [];
     let word = '';
     let inWord = false;
@@ -54,12 +56,12 @@ export function splitCommand(command: string): string[] {
             if (ch === "'") quote = undefined; else word += ch;
         } else if (quote === '"') {
             if (ch === '"') quote = undefined;
-            else if (ch === '\\' && (command[i + 1] === '"' || command[i + 1] === '\\')) word += command[++i];
+            else if (ch === '\\' && (command[i + 1] === '"' || (!win && command[i + 1] === '\\'))) word += command[++i];
             else word += ch;
-        } else if (ch === "'" || ch === '"') {
+        } else if (ch === '"' || (ch === "'" && !win)) {
             quote = ch;
             inWord = true;
-        } else if (ch === '\\' && i + 1 < command.length) {
+        } else if (ch === '\\' && !win && i + 1 < command.length) {
             word += command[++i];
             inWord = true;
         } else if (/\s/.test(ch)) {
@@ -90,7 +92,7 @@ export async function editCommand(
     const [row] = await planRows(host, host.select(names, true));
     const name = row.profile.name;
     if (row.cls.kind === 'error') {
-        ctx.stdout.write(`${style.red(sym.error)} ${name}: ${row.cls.label}${row.cls.detail ? ` — ${row.cls.detail}` : ''}\n`);
+        ctx.stdout.write(`${style.red(sym.error)} ${name}: ${row.cls.label}${row.cls.detail ? ` ${sym.dash} ${row.cls.detail}` : ''}\n`);
         return EXIT.stuck;
     }
 
@@ -104,7 +106,7 @@ export async function editCommand(
                 label: d === 'upload' ? 'Edit the local version, then upload it' : 'Edit the remote version, then download it',
                 hint: d === 'upload' ? 'replaces the remote version' : 'replaces the local file'
             }));
-        const why = row.cls.kind === 'in-sync' ? 'in sync' : row.cls.detail ? `${row.cls.label} — ${row.cls.detail}` : row.cls.label;
+        const why = row.cls.kind === 'in-sync' ? 'in sync' : row.cls.detail ? `${row.cls.label} ${sym.dash} ${row.cls.detail}` : row.cls.label;
         direction = await ctx.prompts.select(`${name}: ${why}. Which way?`, choices);
         if (!direction) return EXIT.pending;
     }
@@ -148,13 +150,13 @@ export async function editCommand(
             [command, args] = ['code', ['--wait', '--diff', destPath, candidatePath]];
         } else {
             const editor = ctx.env.VISUAL || ctx.env.EDITOR || (ctx.pathEnv.platform === 'win32' ? 'notepad' : 'vi');
-            const parts = splitCommand(editor);
+            const parts = splitCommand(editor, ctx.pathEnv.platform);
             if (parts.length === 0) throw new UsageError('$VISUAL/$EDITOR is empty.');
             [command, args] = [parts[0], [...parts.slice(1), candidatePath]];
         }
 
         const hidden = plan.excludeKeys.length > 0 ? ' (excluded keys hidden)' : '';
-        const which = opts.tool === 'code' ? ' — edit the right-hand side' : '';
+        const which = opts.tool === 'code' ? ` ${sym.dash} edit the right-hand side` : '';
         ctx.stdout.write(style.dim(`Editing the ${direction === 'upload' ? 'local' : 'remote'} version of ${name}${hidden}${which}. Save and close the editor when done.\n`));
         const started = ctx.now();
         let status: number;
@@ -176,7 +178,7 @@ export async function editCommand(
         const edited = fs.readFileSync(candidatePath, 'utf-8');
         if (edited === original && ctx.now() - started < INSTANT_MS) {
             ctx.stdout.write(
-                `${style.yellow(sym.conflict)} The editor returned immediately without changes — it probably doesn't wait for the file to close ` +
+                `${style.yellow(sym.conflict)} The editor returned immediately without changes ${sym.dash} it probably doesn't wait for the file to close ` +
                 '(for VS Code use `code --wait` in $EDITOR, or `--tool code`). Nothing was written.\n'
             );
             return EXIT.pending;

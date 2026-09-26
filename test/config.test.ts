@@ -335,7 +335,10 @@ test('while migration is blocked by a corrupt shared file, profile edits are ref
 
     assert.equal(ConfigManager.updateProfiles((ps) => [...ps, P('b')]), undefined);
 
-    assert.match(vscode.window.errorMessages.at(-1)!, /can't be edited until the shared config .* is fixed/);
+    assert.match(vscode.window.errorMessages.at(-1)!, /can't be edited right now: the shared config couldn't be used \(.*Failed to parse/);
+    assert.match(ConfigManager.getFallbackReason()!, /couldn't be used/);
+    assert.match(ConfigManager.getConfigPathForDisplay()!, /neon-sync\.json$/, 'the path shown is still the shared one');
+    assert.notEqual(ConfigManager.getConfigPathForDisplay(), legacyPath);
     assert.deepEqual(JSON.parse(fs.readFileSync(legacyPath, 'utf-8')).profiles.map((p: Profile) => p.name), ['a']);
 });
 
@@ -413,13 +416,14 @@ test('a read-only shared config (e.g. home-manager) stays in use; profiles only 
 });
 
 test('a busy lock on the very first migration shows this editor\'s profiles (read-only) for the session', async () => {
-    const { ConfigManager, sharedPath } = setupMigration({ profiles: [P('a')] });
+    const { ConfigManager, sharedPath, vscode } = setupMigration({ profiles: [P('a')] });
     fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
     fs.mkdirSync(`${sharedPath}.lock`);
     try {
         await ConfigManager.migrateLegacyConfig();
         assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['a']);
         assert.equal(ConfigManager.updateProfiles((ps) => ps), undefined, 'read-only meanwhile');
+        assert.match(vscode.window.errorMessages.at(-1)!, /couldn't be created yet .*retried next launch/, 'says why: busy, not broken');
     } finally {
         fs.rmdirSync(`${sharedPath}.lock`);
     }

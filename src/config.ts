@@ -10,6 +10,7 @@ import {
 } from './core/configFile';
 import { resolveProfilePath, samePathKey } from './core/localFile';
 import { abbreviateHome, configDir, stateDir } from './core/paths';
+import { incompleteProfileReason } from './core/profileValidation';
 import { SYNC_STATE_DIRNAME } from './core/syncState';
 import type { ConfigFile, Profile } from './core/types';
 
@@ -40,12 +41,7 @@ function isWriteDenied(e: unknown): boolean {
 const EXTENSION_LOCK_WAIT_MS = 2_000;
 
 function isCompleteProfile(value: unknown): value is Profile {
-    const p = value as Partial<Profile> | null;
-    return typeof p === 'object' && p !== null
-        && typeof p.name === 'string' && p.name.trim() !== ''
-        && typeof p.filePath === 'string' && p.filePath.trim() !== ''
-        && typeof p.id === 'string' && p.id.trim() !== ''
-        && typeof p.tableName === 'string' && p.tableName.trim() !== '';
+    return incompleteProfileReason(value) === undefined;
 }
 
 export class ConfigManager {
@@ -58,7 +54,8 @@ export class ConfigManager {
      * this session reads this editor's old file, read-only — edits made there
      * would be lost once the shared file is fixed and migration merges.
      */
-    private static legacyFallback = false;
+    /** Why this editor's own (legacy) profile list is shown read-only; undefined = using the shared config. */
+    private static legacyFallback: string | undefined;
     private static readonly connectionStringListeners = new Set<() => void>();
 
     /**
@@ -69,7 +66,7 @@ export class ConfigManager {
         this.globalStorageUri = context.globalStorageUri;
         this.secrets = context.secrets;
         this.locations = locations ?? { configDir: configDir(), stateDir: stateDir() };
-        this.legacyFallback = false;
+        this.legacyFallback = undefined;
 
         // Ensure global storage directory exists
         if (!fs.existsSync(this.globalStorageUri.fsPath)) {
@@ -84,8 +81,13 @@ export class ConfigManager {
 
     /** The shared profiles file, `~`-abbreviated for display. */
     static getConfigPathForDisplay(): string | undefined {
-        const store = this.getStore();
+        const store = this.sharedStore();
         return store && abbreviateHome(store.filePath);
+    }
+
+    /** Why the profiles shown are this editor's own read-only copy, if they are. */
+    static getFallbackReason(): string | undefined {
+        return this.legacyFallback;
     }
 
     private static sharedStore(): ConfigFileStore | undefined {
@@ -172,8 +174,8 @@ export class ConfigManager {
                 // Busy, or a (possibly transient) permission error before the
                 // shared file exists: retry next launch, no marker. Until then
                 // show this editor's own profiles (read-only) if there's no shared file yet.
-                if (!shared.exists()) this.legacyFallback = true;
                 const reason = e instanceof Error ? e.message : String(e);
+                if (!shared.exists()) this.legacyFallback = `the shared config couldn't be created yet (${reason}); it will be retried next launch`;
                 vscode.window.showWarningMessage(`Neon Sync will move this editor's profiles to the shared config next time: ${reason}`);
                 return undefined;
             }
@@ -192,8 +194,8 @@ export class ConfigManager {
                 }
                 return { ...report, added: [], notCopied };
             }
-            this.legacyFallback = true;
             const reason = e instanceof Error ? e.message : String(e);
+            this.legacyFallback = `the shared config couldn't be used (${reason})`;
             vscode.window.showErrorMessage(
                 `Neon Sync couldn't move profiles to the shared config ${abbreviateHome(shared.filePath)}: ${reason} ` +
                 'Until that is fixed, this editor shows its own profile list (read-only).'
@@ -336,7 +338,7 @@ export class ConfigManager {
         }
         if (this.legacyFallback) {
             vscode.window.showErrorMessage(
-                `Profiles can't be edited until the shared config ${this.sharedStore() ? abbreviateHome(this.sharedStore()!.filePath) : ''} is fixed (it couldn't be read at startup). Reload the window after fixing it.`
+                `Profiles can't be edited right now: ${this.legacyFallback}. This editor shows its own profile list (read-only) until then; reload the window after fixing it.`
             );
             return undefined;
         }
@@ -353,7 +355,10 @@ export class ConfigManager {
         }
     }
 
-    /** Replace the whole profile list (under the lock; refuses a corrupt file). */
+    /**
+     * Replace the whole profile list (under the lock; refuses a corrupt file).
+     * For edits use updateProfiles: this overwrites whatever changed since the caller read.
+     */
     static async saveProfiles(profiles: Profile[]): Promise<void> {
         this.updateProfiles(() => profiles);
     }

@@ -19,9 +19,9 @@ export function makeStyle(enabled: boolean): Style {
     return { bold: c.bold, dim: c.dim, green: c.green, red: c.red, yellow: c.yellow, cyan: c.cyan };
 }
 
-/** Colors on only for a TTY, and never with NO_COLOR / --no-color. */
+/** Colors on only for a TTY, and never with NO_COLOR / --no-color / TERM=dumb. */
 export function colorEnabled(isTTY: boolean, env: Record<string, string | undefined>, noColorFlag: boolean): boolean {
-    return isTTY && !noColorFlag && !('NO_COLOR' in env && env.NO_COLOR !== '');
+    return isTTY && !noColorFlag && env.TERM !== 'dumb' && !('NO_COLOR' in env && env.NO_COLOR !== '');
 }
 
 /**
@@ -46,10 +46,15 @@ export interface Symbols {
     minus: string;
     dot: string;
     arrowLeft: string;
+    arrowRight: string;
+    /** Between two things that sync both ways. */
+    both: string;
+    /** A dash between a label and its explanation. */
+    dash: string;
 }
 
-export const UNICODE: Symbols = { inSync: '✓', upload: '↑', download: '↓', conflict: '⚠', unknown: '?', error: '✗', ellipsis: '…', minus: '−', dot: '·', arrowLeft: '←' };
-export const ASCII: Symbols = { inSync: '=', upload: '^', download: 'v', conflict: '!', unknown: '?', error: 'x', ellipsis: '...', minus: '-', dot: '|', arrowLeft: '<-' };
+export const UNICODE: Symbols = { inSync: '✓', upload: '↑', download: '↓', conflict: '⚠', unknown: '?', error: '✗', ellipsis: '…', minus: '−', dot: '·', arrowLeft: '←', arrowRight: '→', both: '⇄', dash: '—' };
+export const ASCII: Symbols = { inSync: '=', upload: '^', download: 'v', conflict: '!', unknown: '?', error: 'x', ellipsis: '...', minus: '-', dot: '|', arrowLeft: '<-', arrowRight: '->', both: '<->', dash: '-' };
 
 export function rowSymbol(row: RowClass, sym: Symbols, style: Style): string {
     switch (row.kind) {

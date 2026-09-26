@@ -149,7 +149,8 @@ export class SettingsPanel {
             command: 'loadSettings',
             connectionString: connectionString ?? '',
             profiles: ConfigManager.getProfiles(),
-            configPath: ConfigManager.getConfigPathForDisplay() ?? ''
+            configPath: ConfigManager.getConfigPathForDisplay() ?? '',
+            configFallback: ConfigManager.getFallbackReason() ?? ''
         });
         this._settingsLoaded = true;
         if (this._pendingFocus) {
@@ -935,7 +936,10 @@ const SETTINGS_SCRIPT = `
                 hideClearConfirm();
                 setConnectionStatus('', '');
                 renderProfiles(msg.profiles || []);
-                if (msg.configPath) {
+                if (msg.configFallback) {
+                    els.configPath.textContent = 'Showing this editor\'s own profiles, read-only: ' + msg.configFallback + '. Profiles normally live in ' + msg.configPath + '.';
+                    els.configPath.hidden = false;
+                } else if (msg.configPath) {
                     els.configPath.textContent = 'Profiles are stored in ' + msg.configPath + ', shared with the neon-sync CLI and your other editors.';
                     els.configPath.hidden = false;
                 }

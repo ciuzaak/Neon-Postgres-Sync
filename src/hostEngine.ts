@@ -37,7 +37,7 @@ export function resolveWorkspacePath(filePath: string): string {
 
 /**
  * A SyncEngine wired to this host: the configured connection (prompting and
- * throwing if none is set) and baselines under globalStorage. The profiles
+ * throwing if none is set) and baselines in the shared state directory. The profiles
  * about to be synced are validated first, so a bad table name fails as such
  * instead of surfacing the missing-connection prompt, and a profile sharing
  * its local file with any configured profile is refused (see

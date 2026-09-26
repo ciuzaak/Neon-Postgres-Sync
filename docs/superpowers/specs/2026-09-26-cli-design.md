@@ -80,7 +80,7 @@ Runs once per `globalStorage` location, on activation, before anything reads pro
    - shared file missing → write the old profiles;
    - shared file present and valid → merge by name: add profiles it lacks, skipping any whose file resolves to the same file as an existing profile (they would clash); for a name in both with different fields, keep the shared one;
    - shared file present but unreadable/corrupt → **abort** migration (no marker), show an error with the path; the extension shows the old file's profiles **read-only** until it's fixed (edits there would be lost when the fixed shared file wins the merge);
-   - config lock busy → postpone (no marker, no fallback), retry next launch;
+   - config lock busy → postpone (no marker), retry next launch; if the shared file doesn't exist yet, show this editor's own profiles read-only until then;
    - incomplete legacy entries (missing name/file/id/table) are skipped and named in the notification, left in the backup.
 4. **Tell the user what changed:** one notification naming profiles added from this editor (`vscode.env.appName`), kept-shared conflicts, and skipped clashes. (A late-migrating editor can re-add a profile deleted elsewhere — surfacing the added names makes that visible.)
 5. The old file stays as a backup (secret-free after step 1) and is never read again.
@@ -143,7 +143,7 @@ One batch fetch (`SyncEngine.plan`), one line per profile, config path in the he
 
 `✓` identical · `↑`/`↓` known direction · `⚠` conflict or deleted-since-sync · `?` no history (timestamp guess shown, never auto-applied) · `✗` error (parse error, missing both, shared file, relative path, WSL Windows-drive path). Large deletions show `decide` like conflicts. `--ascii` (automatic when the terminal can't render UTF-8, e.g. legacy Windows consoles) uses `=`, `^`, `v`, `!`, `?`, `x`.
 
-`--json`: `{ configPath, profiles: [{ name, filePath, status, change, direction, ambiguous, autoApplicable, reason, added, removed, error }] }`.
+`--json`: `{ configPath, profiles: [{ name, filePath, status, change, direction, autoApplicable, label, reason, added, removed, error }] }`.
 
 `status` may refresh baselines for identical profiles (the engine's `plan()` does); that's a local-only bookkeeping write, documented.
 

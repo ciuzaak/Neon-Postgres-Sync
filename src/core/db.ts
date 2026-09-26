@@ -59,7 +59,8 @@ export class StaleRemoteError extends Error {
  * query path must call this before building SQL.
  */
 export function assertValidTableName(tableName: string): void {
-    if (!PROFILE_TABLENAME_RE.test(tableName)) {
+    // (RegExp.test would turn a missing name into the valid "undefined".)
+    if (typeof tableName !== 'string' || !PROFILE_TABLENAME_RE.test(tableName)) {
         throw new Error(`Invalid table name: "${tableName}". Only letters, numbers, and underscores are allowed.`);
     }
 }

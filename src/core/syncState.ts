@@ -4,7 +4,7 @@ import * as path from 'path';
 import { atomicWriteJson } from './configFile';
 import type { KeyPath } from './jsoncFilter';
 
-/** Directory (next to the config file) holding one JSON file per baseline. */
+/** Directory (under the machine-local state dir, see paths.ts) holding one JSON file per baseline. */
 export const SYNC_STATE_DIRNAME = 'sync-state';
 const STATE_FORMAT_VERSION = 1;
 
@@ -105,7 +105,7 @@ export class SyncStateStore {
         if (read.kind === 'unreadable') {
             throw new Error(`Sync state for "${entry.id}" is unreadable: ${this.fileFor(entry)}`);
         }
-        fs.mkdirSync(this.dir, { recursive: true });
+        fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
         atomicWriteJson(this.fileFor(entry), { version: STATE_FORMAT_VERSION, entry });
     }
 

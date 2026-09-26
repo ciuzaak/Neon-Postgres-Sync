@@ -5,6 +5,7 @@ import type { Ui } from './status';
 
 export async function configCommand(ctx: CliContext, host: Host, args: string[], ui: Ui): Promise<ExitCode> {
     const [sub, ...rest] = args;
+    if (rest.length > 0 && ['path', 'clear-url', 'test'].includes(sub)) throw new UsageError(`\`config ${sub}\` takes no arguments.`);
     const envOverride = !!ctx.env[URL_ENV]?.trim();
     switch (sub) {
         case 'path': {

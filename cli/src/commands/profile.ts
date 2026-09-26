@@ -1,12 +1,11 @@
 import * as fs from 'fs';
-import * as path from 'path';
 import { parsePaths } from '../../../src/core/jsoncFilter';
 import { normalizeProfileForWrite } from '../../../src/core/configFile';
 import { samePathKey } from '../../../src/core/localFile';
-import { abbreviateHome, expandHome } from '../../../src/core/paths';
+import { abbreviateHome } from '../../../src/core/paths';
 import { hasErrors, validateProfileForm } from '../../../src/core/profileValidation';
 import type { Profile } from '../../../src/core/types';
-import { CliContext, EXIT, ExitCode, UsageError } from '../context';
+import { CliContext, EXIT, ExitCode, shellArg, UsageError } from '../context';
 import { Host } from '../host';
 import { pad } from '../ui/format';
 import { DEFAULT_TABLE } from './initDb';
@@ -55,26 +54,27 @@ export async function profileCommand(
                 return EXIT.ok;
             }
             const nameW = Math.max(...profiles.map((p) => p.name.length));
+            const pathW = Math.max(...profiles.map((p) => p.filePath.length));
             for (const p of profiles) {
                 const excluded = p.excludeKeys?.length ? ui.style.dim(`  excludes ${p.excludeKeys.join(', ')}`) : '';
                 ctx.stdout.write(
-                    `  ${pad(p.name, nameW)}  ${p.filePath}  ${ui.style.dim(`${p.tableName}/${p.id}`)}${excluded}\n`
+                    `  ${pad(p.name, nameW)}  ${pad(p.filePath, pathW)}  ${ui.style.dim(`${p.tableName}/${p.id}`)}${excluded}\n`
                 );
             }
             return EXIT.ok;
         }
         case 'show': {
             if (rest.length !== 1) throw new UsageError('Usage: neon-sync profile show <name>');
-            const [p] = host.select(rest, ctx.stdinIsTTY && !opts.json);
+            const [p] = host.select(rest, interactive);
             const resolved = host.resolve(p.filePath);
             const blocked = host.blockers([p]).get(p.name);
             if (opts.json) {
                 ctx.stdout.write(JSON.stringify({ ...p, resolvedPath: resolved ?? null, blocked: blocked ? `${blocked.label}: ${blocked.detail}` : null }, null, 2) + '\n');
-                return EXIT.ok;
+                return blocked ? EXIT.stuck : EXIT.ok;
             }
             const line = (k: string, v: string) => ctx.stdout.write(`  ${pad(k, 13)}${v}\n`);
             line('name', p.name);
-            line('file', p.filePath + (resolved && resolved !== p.filePath ? ui.style.dim(`  → ${resolved}`) : ''));
+            line('file', p.filePath + (resolved && resolved !== p.filePath ? ui.style.dim(`  ${ui.sym.arrowRight} ${resolved}`) : ''));
             line('record', `${p.tableName} / ${p.id}`);
             line('excludeKeys', p.excludeKeys?.length ? p.excludeKeys.join(', ') : ui.style.dim('none'));
             if (blocked) line('status', ui.style.red(`can't sync (${blocked.label}): ${blocked.detail}`));
@@ -84,7 +84,7 @@ export async function profileCommand(
             return addProfile(ctx, host, rest, opts, interactive, ui);
         case 'remove': {
             if (rest.length !== 1) throw new UsageError('Usage: neon-sync profile remove <name> [--yes]');
-            const [target] = host.select(rest, false); // exact names only: this deletes
+            const [target] = host.select(rest, false, '`profile remove` needs the exact name'); // this deletes
             if (!opts.yes) {
                 if (!interactive) throw new UsageError('Removing a profile needs --yes when not in a terminal.');
                 const ok = await ctx.prompts.confirm(`Remove profile "${target.name}"? (The file and the remote record are kept.)`);
@@ -100,6 +100,7 @@ export async function profileCommand(
         }
         case 'rename': {
             if (rest.length !== 2) throw new UsageError('Usage: neon-sync profile rename <old> <new>');
+            host.profiles(); // refuse to edit a config that can't be used as it is
             const [from, to] = [rest[0], rest[1].trim()];
             let problem: string | undefined;
             host.configStore().update((config) => {
@@ -158,10 +159,10 @@ async function addProfile(
         throw new UsageError(`Unsupported --exclude ${unusable.map((k) => `"${k}"`).join(', ')}: use dot-separated key names (no wildcards, indexes or empty parts).`);
     }
 
-    // A path typed on the command line is relative to the current directory;
-    // store it in the portable ~/… (or absolute) form.
-    const expanded = expandHome(file!.trim(), ctx.pathEnv);
-    const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(ctx.cwd, expanded);
+    // A path typed on the command line is relative to --base or the current
+    // directory; store it in the portable ~/… (or absolute) form.
+    host.profiles(); // refuse to add to a config that can't be used as it is
+    const absolute = host.resolveArgument(file!.trim());
     try {
         if (fs.statSync(absolute).isDirectory()) throw new UsageError(`${abbreviateHome(absolute, ctx.pathEnv)} is a directory; --file must name a file.`);
     } catch (e) {
@@ -180,7 +181,8 @@ async function addProfile(
         problem = undefined;
         const errors = validateProfileForm(profile, { existingNames: config.profiles.map((p) => p.name) });
         if (hasErrors(errors)) {
-            problem = Object.values(errors).filter(Boolean).join(' ');
+            const flag: Record<string, string> = { name: 'name', filePath: '--file', id: '--id', tableName: '--table' };
+            problem = Object.entries(errors).filter(([, v]) => v).map(([k, v]) => `${flag[k] ?? k}: ${v}`).join(' ');
             return undefined;
         }
         const key = samePathKey(absolute);
@@ -206,8 +208,8 @@ async function addProfile(
         ctx.stdout.write(JSON.stringify({ added: profile }, null, 2) + '\n');
         return EXIT.ok;
     }
-    ctx.stdout.write(`${ui.style.green(ui.sym.inSync)} Added ${profile.name}: ${profile.filePath} ⇄ ${profile.tableName}/${profile.id}\n`);
-    ctx.stdout.write(ui.style.dim(`  Next: \`neon-sync status ${profile.name}\`\n`));
+    ctx.stdout.write(`${ui.style.green(ui.sym.inSync)} Added ${profile.name}: ${profile.filePath} ${ui.sym.both} ${profile.tableName}/${profile.id}\n`);
+    ctx.stdout.write(ui.style.dim(`  Next: \`neon-sync status ${shellArg(profile.name, ctx.pathEnv.platform)}\`\n`));
     return EXIT.ok;
 }
 

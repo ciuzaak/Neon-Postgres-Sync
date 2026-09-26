@@ -80,10 +80,10 @@ export function abbreviateHome(absolutePath: string, p: Pick<PathEnv, 'platform'
  */
 export function wslBoundaryError(realPath: string, p: Pick<PathEnv, 'platform' | 'env'> = currentPathEnv()): string | undefined {
     if (p.platform === 'win32' && /^\\\\(wsl\$|wsl\.localhost)\\/i.test(realPath)) {
-        return 'this file lives inside WSL — sync it from WSL (neon-sync CLI), not from Windows';
+        return 'this file lives inside WSL; sync it from WSL (neon-sync CLI), not from Windows';
     }
     if (p.platform === 'linux' && p.env.WSL_DISTRO_NAME && /^\/mnt\/[a-z]\//i.test(realPath)) {
-        return 'this file is on a Windows drive — sync it from Windows, or keep a WSL-side copy';
+        return 'this file is on a Windows drive; sync it from Windows, or keep a WSL-side copy';
     }
     return undefined;
 }

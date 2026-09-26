@@ -1,7 +1,8 @@
 import type { ApplyOutcome } from '../../../src/core/engine';
 import { candidateFor } from '../../../src/core/plan';
 import type { SyncDirection } from '../../../src/core/types';
-import { Choice, CliContext, EXIT, ExitCode, UsageError, worstExit } from '../context';
+import { pad } from '../ui/format';
+import { Choice, CliContext, EXIT, ExitCode, shellArg, UsageError, worstExit } from '../context';
 import { Host } from '../host';
 import { forcedNeedsDecision, sourceMissing as missingSource } from '../policy';
 import { diffFor } from './diff';
@@ -86,7 +87,7 @@ export async function applyCommand(
     for (const row of rows) {
         const { cls } = row;
         if (cls.kind === 'error') {
-            decisions.push({ row, action: 'none', why: `can't sync: ${cls.label}${cls.detail ? ` — ${cls.detail}` : ''}`, code: EXIT.stuck });
+            decisions.push({ row, action: 'none', why: `can't sync: ${cls.label}${cls.detail ? ` ${ui.sym.dash} ${cls.detail}` : ''}`, code: EXIT.stuck });
             continue;
         }
         if (cls.kind === 'in-sync') {
@@ -117,9 +118,9 @@ export async function applyCommand(
             pending.push({ row, direction: cls.direction, needsAnswer: false, how: 'auto', reason: cls.label });
         } else if (prefer) {
             // Only reachable with explicit names (checked above): naming the profile is the decision.
-            pending.push({ row, direction: prefer, needsAnswer: false, how: 'preferred', reason: `${cls.label} — --prefer ${opts.prefer}` });
+            pending.push({ row, direction: prefer, needsAnswer: false, how: 'preferred', reason: `${cls.label} ${ui.sym.dash} --prefer ${opts.prefer}` });
         } else {
-            pending.push({ row, direction: undefined, needsAnswer: true, how: 'auto', reason: cls.detail ? `${cls.label} — ${cls.detail}` : cls.label });
+            pending.push({ row, direction: undefined, needsAnswer: true, how: 'auto', reason: cls.detail ? `${cls.label} ${ui.sym.dash} ${cls.detail}` : cls.label });
         }
     }
 
@@ -143,7 +144,7 @@ export async function applyCommand(
         } else if (p.needsAnswer) {
             const hint = forced
                 ? `${p.reason}; confirm it in a terminal, or add --force --yes`
-                : `${p.reason}; decide interactively, or \`neon-sync sync ${p.row.profile.name} --prefer local|remote --yes\``;
+                : `${p.reason}; decide interactively, or \`neon-sync sync ${shellArg(p.row.profile.name, ctx.pathEnv.platform)} --prefer local|remote --yes\``;
             decisions.push({ row: p.row, action: 'skip', why: `needs a decision: ${hint}`, code: EXIT.pending });
             continue;
         } else {
@@ -185,7 +186,7 @@ async function askUser(ctx: CliContext, host: Host, mode: ApplyMode, pending: Pe
     const choices: Choice<string>[] = pending.map((p, i) => ({
         value: String(i),
         label: `${arrow(p.direction)} ${p.row.profile.name}`,
-        hint: p.needsAnswer ? `${p.reason} — you'll be asked` : p.reason
+        hint: p.needsAnswer ? `${p.reason} ${sym.dash} you'll be asked` : p.reason
     }));
     const picked = await ctx.prompts.multiselect(
         mode === 'sync' ? 'Apply which?' : `${mode === 'pull' ? 'Download' : 'Upload'} which?`,
@@ -253,15 +254,17 @@ function report(
     const codes: ExitCode[] = [];
     const json: Array<Record<string, unknown>> = [];
     const lines: string[] = [];
+    const nameW = Math.min(30, Math.max(0, ...decisions.map((d) => d.row.profile.name.length)));
 
     for (const d of decisions) {
         const name = d.row.profile.name;
+        const shownName = pad(name, nameW);
         if (d.action !== 'apply') {
             codes.push(d.code);
             json.push({ name, kind: d.action === 'skip' ? 'skipped' : d.code === EXIT.ok ? 'in-sync' : 'error', reason: d.why });
             if (d.code !== EXIT.ok || decisions.length === 1) {
                 const mark = d.code === EXIT.stuck ? style.red(sym.error) : d.code === EXIT.ok ? style.green(sym.inSync) : style.yellow(sym.conflict);
-                lines.push(`  ${mark}  ${name}  ${style.dim(d.why)}`);
+                lines.push(`  ${mark}  ${shownName}  ${style.dim(d.why)}`);
             }
             continue;
         }
@@ -269,13 +272,13 @@ function report(
         if (!opts.applying) {
             codes.push(EXIT.pending);
             json.push({ name, kind: 'would-apply', direction: d.direction, how: d.how });
-            lines.push(`  ${arrow}  ${name}  ${style.dim(`would ${d.direction}`)}`);
+            lines.push(`  ${arrow}  ${shownName}  ${style.dim(`would ${d.direction}`)}`);
             continue;
         }
         const described = describeOutcome(outcomes.get(d.row)!, d.direction, ui);
         codes.push(described.code);
         json.push({ name, ...described.json });
-        lines.push(`  ${described.mark}  ${name}  ${described.text}`);
+        lines.push(`  ${described.mark}  ${shownName}  ${described.text}`);
     }
 
     const code = worstExit(...codes);
@@ -308,21 +311,21 @@ export function describeOutcome(
                 code: EXIT.ok,
                 mark: style.cyan(direction === 'upload' ? sym.upload : sym.download),
                 text: (direction === 'upload' ? 'uploaded' : 'downloaded') + (o.baselineError
-                    ? style.yellow(` (couldn't record sync history: ${o.baselineError} — the next sync may ask about this profile)`)
+                    ? style.yellow(` (couldn't record sync history: ${o.baselineError} ${sym.dash} the next sync may ask about this profile)`)
                     : ''),
                 json: { kind: 'applied', direction, ...(o.baselineError ? { baselineError: o.baselineError } : {}) }
             };
         case 'stale-remote':
-            return { code: EXIT.failure, mark: fail, text: 'the remote changed meanwhile — nothing written; re-run', json: { kind: o.kind, direction } };
+            return { code: EXIT.failure, mark: fail, text: `the remote changed meanwhile ${sym.dash} nothing written; re-run`, json: { kind: o.kind, direction } };
         case 'not-applied':
-            return { code: EXIT.failure, mark: fail, text: 'not applied — another row in the batch was stale; re-run', json: { kind: o.kind, direction } };
+            return { code: EXIT.failure, mark: fail, text: `not applied ${sym.dash} another row in the batch was stale; re-run`, json: { kind: o.kind, direction } };
         case 'stale-local':
             return {
                 code: EXIT.failure,
                 mark: fail,
                 text: o.remoteCommitted
                     ? 'remote saved, but the local file changed meanwhile and was not overwritten; re-run'
-                    : 'the local file changed meanwhile — nothing written; re-run',
+                    : `the local file changed meanwhile ${sym.dash} nothing written; re-run`,
                 json: { kind: o.kind, direction, remoteCommitted: o.remoteCommitted }
             };
         case 'merge-error':

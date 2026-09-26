@@ -37,7 +37,7 @@ export async function diffCommand(
     const { style, sym } = ui;
 
     if (row.cls.kind === 'error') {
-        ctx.stdout.write(`${style.red(sym.error)} ${row.profile.name}: ${row.cls.label}${row.cls.detail ? ` — ${row.cls.detail}` : ''}\n`);
+        ctx.stdout.write(`${style.red(sym.error)} ${row.profile.name}: ${row.cls.label}${row.cls.detail ? ` ${sym.dash} ${row.cls.detail}` : ''}\n`);
         return EXIT.stuck;
     }
     if (row.cls.kind === 'in-sync') {
@@ -48,7 +48,7 @@ export async function diffCommand(
     const direction = forced ?? row.cls.direction ?? row.plan!.suggestion.direction;
     const refused = sourceMissing(row.plan!, direction);
     if (refused) {
-        ctx.stdout.write(`${style.red(sym.error)} ${row.profile.name}: ${direction === 'upload' ? 'an upload' : 'a download'} would be refused — ${refused} (deletions aren't synced).\n`);
+        ctx.stdout.write(`${style.red(sym.error)} ${row.profile.name}: ${direction === 'upload' ? 'an upload' : 'a download'} would be refused ${sym.dash} ${refused} (deletions aren't synced).\n`);
         return EXIT.stuck;
     }
     const arrow = direction === 'upload' ? `${sym.upload} upload (Remote ${sym.arrowLeft} Local)` : `${sym.download} download (Local ${sym.arrowLeft} Remote)`;

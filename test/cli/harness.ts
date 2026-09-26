@@ -24,7 +24,9 @@ export interface CliFixture {
     pg: Awaited<ReturnType<typeof createPgliteSql>>;
     keychain: Keychain & { value?: string };
     run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter>; columns?: number;
-        editor?: (command: string, args: string[]) => Promise<number>; now?: () => number }): Promise<RunResult>;
+        editor?: (command: string, args: string[]) => Promise<number>; now?: () => number;
+        /** Pretend to run on another platform (paths still resolve on this one). */
+        platform?: NodeJS.Platform; platformEnv?: Record<string, string> }): Promise<RunResult>;
     file(p: string): string;
     writeFile(p: string, content: string, mtime?: Date): void;
     remote(id: string): Promise<string | undefined>;
@@ -76,9 +78,11 @@ export async function cliFixture(opts: {
                 stderr: { write: (t) => { stderr += t; }, isTTY: tty },
                 stdinIsTTY: tty,
                 readStdin: async () => runOpts.stdin ?? '',
-                env: { ...(runOpts.env ?? {}) },
+                // A modern Windows terminal (Windows Terminal sets WT_SESSION), so
+                // every platform gets the Unicode symbols the assertions expect.
+                env: { WT_SESSION: 'test', ...(runOpts.env ?? {}) },
                 cwd: home,
-                pathEnv: { platform: process.platform, home, env: {} },
+                pathEnv: { platform: runOpts.platform ?? process.platform, home, env: runOpts.platformEnv ?? {} },
                 keychain,
                 createStore: (url) => {
                     neon.nextSql = pg.sql;

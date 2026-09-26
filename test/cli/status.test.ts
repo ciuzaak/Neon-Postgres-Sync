@@ -37,7 +37,7 @@ test('without sync history, a clear timestamp gap is still only a guess: decide,
     const s = byName((await f.run(['status', '--json'])).stdout).guess;
 
     assert.deepEqual([s.status, s.autoApplicable, s.direction], ['decide', false, 'upload']);
-    assert.match(s.label, /^no history · newer local/);
+    assert.match(s.label, /^no history, newer local/);
 });
 
 test('with history: one-sided changes are auto; both changed is a conflict to decide', async () => {
@@ -94,7 +94,7 @@ test('blocked rows (relative path, shared file) are errors with exit 4; --base u
     const r = await f.run(['status', '--json']);
     assert.equal(r.code, 4);
     const s = byName(r.stdout);
-    assert.match(s.rel.error!, /^relative path: use ~\/… or an absolute path, or pass --base/);
+    assert.match(s.rel.error!, /^relative path: use a ~\/ or absolute path, or pass --base/);
     assert.match(s.a.error!, /^shared file: same local file as profile "b"/);
 
     f.writeFile('~/proj/notes.md', 'n');
@@ -115,7 +115,7 @@ test('names: exact in scripts, unique prefixes only interactively, clear errors 
 
     const script = await f.run(['status', 'zs', '--json']);
     assert.equal(script.code, 2);
-    assert.match(script.stderr, /No profile named "zs" \(scripts need exact names\)/);
+    assert.match(script.stderr, /No profile named "zs" \(prefixes only work in a terminal, without --yes or --json\)/);
 
     const tty = await f.run(['status', 'zs'], { tty: true });
     assert.equal(tty.code, 1);

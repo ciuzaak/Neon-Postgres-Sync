@@ -66,7 +66,7 @@ export function classify(plan: SyncPlan): RowClass {
     }
     if (plan.change === 'unknown') {
         const why = plan.baselineExists ? 'excludeKeys changed' : 'no history';
-        return decide(`${why} · newer ${direction === 'upload' ? 'local' : 'remote'}`, plan.suggestion.reason);
+        return decide(`${why}, newer ${direction === 'upload' ? 'local' : 'remote'}`, plan.suggestion.reason);
     }
 
     // change is 'local' or 'remote': the direction is known.
