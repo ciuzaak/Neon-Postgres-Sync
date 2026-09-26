@@ -313,6 +313,7 @@ test('--force in a terminal still confirms each destructive row (only --force --
     assert.deepEqual(initial, [], 'not pre-selected');
     assert.match(asked, /overwrites local changes made since the last sync/);
     assert.equal(r.code, 1);
+    assert.match(r.stdout, /a {2}skipped$/m, 'a deliberate Skip is reported as such');
     assert.equal(f.file('~/a.json'), 'local edit');
 });
 

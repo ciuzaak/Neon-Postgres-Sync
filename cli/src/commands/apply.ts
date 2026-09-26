@@ -134,8 +134,8 @@ export async function applyCommand(
         let direction: SyncDirection | undefined;
         let how: 'auto' | 'preferred' | 'chosen' | 'forced';
         if (opts.interactive) {
-            if (answer === undefined) {
-                decisions.push({ row: p.row, action: 'skip', why: 'not selected', code: EXIT.pending });
+            if (answer === undefined || answer === 'skip') {
+                decisions.push({ row: p.row, action: 'skip', why: answer === 'skip' ? 'skipped' : 'not selected', code: EXIT.pending });
                 continue;
             }
             direction = answer;
@@ -173,9 +173,12 @@ export async function applyCommand(
     return report(ctx, host, decisions, outcomes, { ...opts, applying }, ui);
 }
 
-/** Interactive selection; returns the chosen direction per row (absent = skip), or undefined if cancelled. */
-async function askUser(ctx: CliContext, host: Host, mode: ApplyMode, pending: Pending[], ui: Ui): Promise<Map<Row, SyncDirection> | undefined> {
-    const out = new Map<Row, SyncDirection>();
+/**
+ * Interactive selection; returns per row the chosen direction or 'skip' (the
+ * user picked Skip), absent = not selected. Undefined if cancelled.
+ */
+async function askUser(ctx: CliContext, host: Host, mode: ApplyMode, pending: Pending[], ui: Ui): Promise<Map<Row, SyncDirection | 'skip'> | undefined> {
+    const out = new Map<Row, SyncDirection | 'skip'>();
     if (pending.length === 0) return out;
     const { sym } = ui;
     const arrow = (d?: SyncDirection) => d === 'upload' ? sym.upload : d === 'download' ? sym.download : sym.conflict;
@@ -217,7 +220,10 @@ async function askUser(ctx: CliContext, host: Host, mode: ApplyMode, pending: Pe
             options.push({ value: 'diff', label: 'Show diff' }, { value: 'skip', label: 'Skip' });
             const answer = await ctx.prompts.select(`${p.row.profile.name}: ${p.reason}. What should happen?`, options);
             if (answer === undefined) return undefined;
-            if (answer === 'skip') break;
+            if (answer === 'skip') {
+                out.set(p.row, 'skip');
+                break;
+            }
             if (answer === 'diff') {
                 // The diff of every direction offered, so neither choice is blind.
                 const directions = options.map((o) => o.value).filter((v): v is SyncDirection => v === 'upload' || v === 'download');
