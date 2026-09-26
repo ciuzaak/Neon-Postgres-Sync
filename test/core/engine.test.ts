@@ -299,7 +299,8 @@ test('uploading an empty file to a missing row creates the row', async () => {
     assert.equal(await remoteOf('a'), '');
 });
 
-test('a local file that becomes unreadable after the remote commit fails only its own row', { skip: process.getuid?.() === 0 }, async () => {
+// chmod can't revoke read access on Windows (it only toggles read-only), and root ignores it.
+test('a local file that becomes unreadable after the remote commit fails only its own row', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
     const { engine, pg, dir, localOf, remoteOf, state } = await setup({ remote: { a: 'ra', b: 'rb' }, local: { a: 'la', b: 'lb' } });
     const plans = await engine.plan([profile('a'), profile('b')]);
     const realTx = pg.sql.transaction;

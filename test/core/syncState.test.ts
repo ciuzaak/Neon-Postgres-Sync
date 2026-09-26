@@ -100,7 +100,8 @@ test('an entry whose stored key does not match (hash collision / tampering) read
     assert.equal(store.get(entry()), undefined);
 });
 
-test('an unreadable entry reads as empty but a write to it throws instead of guessing', { skip: process.getuid?.() === 0 }, () => {
+// chmod can't revoke read access on Windows (it only toggles read-only), and root ignores it.
+test('an unreadable entry reads as empty but a write to it throws instead of guessing', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
     const store = new SyncStateStore(tempStateDir());
     store.put(entry());
     store.put(entry({ id: 'other' }));
