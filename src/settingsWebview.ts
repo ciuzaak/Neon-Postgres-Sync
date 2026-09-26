@@ -552,7 +552,7 @@ const SETTINGS_BODY = `
                 <div class="ns-form-row">
                     <label class="ns-label" for="pmExcludeKeys">Exclude keys (one per line, JSON/JSONC only)</label>
                     <textarea class="ns-input ns-input--textarea" id="pmExcludeKeys" rows="4" autocomplete="off" spellcheck="false" placeholder="editor.fontSize&#10;workbench.colorTheme"></textarea>
-                    <p class="ns-hint">Paths use dot-separators (e.g. <code>a.b.c</code>). Filtered keys are hidden from the diff and preserved as-is on the target side at confirm time.</p>
+                    <p class="ns-hint">Paths use dot-separators (e.g. <code>a.b.c</code>); a dot also matches a dot inside a key name, so <code>editor.fontSize</code> covers VS Code's flat settings too. Filtered keys are hidden from the diff and preserved as-is on the target side at confirm time.</p>
                     <p class="ns-hint" id="pmExcludeKeysExtWarning" hidden>Exclude keys only apply to JSON/JSONC files. The current path doesn't end in <code>.json</code> or <code>.jsonc</code> — filtering will only run if the file parses as JSONC at sync time.</p>
                 </div>
             </details>

@@ -8,7 +8,7 @@ import {
     finalizeCandidate,
     planSync
 } from '../../src/core/plan';
-import { filterFingerprint, hashProjection, SyncBaseline } from '../../src/core/syncState';
+import { filterFingerprint, hashProjection, legacyFilterFingerprint, SyncBaseline } from '../../src/core/syncState';
 import { stripKeys } from '../../src/core/jsoncFilter';
 import type { LocalSnapshot } from '../../src/core/localFile';
 import type { FetchedRecord, Profile } from '../../src/core/types';
@@ -383,4 +383,31 @@ test('baselineExists tells first-time setup from a side deleted since the last s
 test('computeDiffStats: bare-CR files have lines too, and a final newline is not an extra line', () => {
     assert.deepEqual(computeDiffStats('a\rb\rc', 'a', 'upload'), { added: 2, removed: 0 });
     assert.deepEqual(computeDiffStats('a\nb\n', 'a\nb', 'upload'), { added: 0, removed: 0 });
+});
+
+// ── upgrade to flat-key matching ──────────────────────────────────────
+
+test('a baseline from before flat-key matching still applies while neither side has a flat form', () => {
+    const p = profile({ excludeKeys: ['window.zoom'] });
+    const base = '{"a": 1, "window": {}}';
+    const old = { ...baselineOf(base), filterFingerprint: legacyFilterFingerprint([['window', 'zoom']]) };
+    const plan = planSync(p, local('{"a": 2, "window": {"zoom": 1}}', REMOTE_OLDER), remote('{"a": 1, "window": {"zoom": 3}}', LOCAL_NEWER), old);
+    assert.equal(plan.change, 'local', plan.suggestion.reason);
+});
+
+test('with a flat form on either side, an older baseline no longer applies ("excludeKeys changed")', () => {
+    const p = profile({ excludeKeys: ['editor.fontSize'] });
+    const old = { ...baselineOf('{"a": 1, "editor.fontSize": 14}'), filterFingerprint: legacyFilterFingerprint([['editor', 'fontSize']]) };
+    for (const [l, r] of [
+        ['{"a": 2, "editor.fontSize": 14}', '{"a": 1, "editor.fontSize": 20}'],
+        ['{"a": 2}', '{"a": 1, "editor.fontSize": 20}']
+    ]) {
+        const plan = planSync(p, local(l, REMOTE_OLDER), remote(r, LOCAL_NEWER), old);
+        assert.equal(plan.change, 'unknown', `${l} / ${r}`);
+        assert.match(plan.suggestion.reason, /^excludeKeys changed since last sync/);
+    }
+    // A baseline written with the current fingerprint applies as usual.
+    const current = baselineOf('{"a": 1}', [['editor', 'fontSize']]);
+    const plan = planSync(p, local('{"a": 2, "editor.fontSize": 14}', REMOTE_OLDER), remote('{"a": 1, "editor.fontSize": 20}', LOCAL_NEWER), current);
+    assert.equal(plan.change, 'local');
 });

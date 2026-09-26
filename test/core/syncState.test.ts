@@ -140,3 +140,12 @@ test('filterFingerprint is order-insensitive and distinguishes different sets', 
     assert.notEqual(filterFingerprint([['a.b']]), filterFingerprint([['a', 'b']]));
     assert.notEqual(filterFingerprint([]), filterFingerprint([['a']]));
 });
+
+test('filterFingerprint: single-key sets keep their pre-flat-key fingerprint; dotted paths are versioned', () => {
+    const legacy = (paths: string[][]) => hashProjection(JSON.stringify(paths));
+    // Unchanged matching → unchanged fingerprint, so existing baselines stay usable.
+    assert.equal(filterFingerprint([['theme'], ['zoom']]), legacy([['theme'], ['zoom']]));
+    assert.equal(filterFingerprint([]), legacy([]));
+    // A dotted path now also matches flat keys: an old baseline must read as "excludeKeys changed".
+    assert.notEqual(filterFingerprint([['editor', 'fontSize']]), legacy([['editor', 'fontSize']]));
+});

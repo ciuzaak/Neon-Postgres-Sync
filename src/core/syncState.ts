@@ -35,14 +35,38 @@ export function hashProjection(projection: string): string {
     return crypto.createHash('sha256').update(projection, 'utf8').digest('hex');
 }
 
-/** Order-insensitive: the same set of paths always yields the same fingerprint. */
+/**
+ * Order-insensitive: the same set of paths always yields the same fingerprint.
+ *
+ * Paths with a dot also match flat keys such as `"editor.fontSize"` (added
+ * after 0.8.0, see jsoncFilter concretePaths), so the same paths can now strip more
+ * than when an older baseline was taken: those sets hash with a version
+ * marker; a baseline without it applies only while neither side has a flat
+ * form (plan.ts), else the next sync is handled as "excludeKeys changed"
+ * rather than as a misleading "both changed".
+ * Single-key sets match exactly as before and keep their fingerprint.
+ */
 export function filterFingerprint(excludeKeys: ReadonlyArray<KeyPath>): string {
-    const normalized = excludeKeys.map((p) => [...p]).sort((a, b) => {
+    const normalized = sortedPaths(excludeKeys);
+    const matchesFlatKeys = normalized.some((p) => p.length > 1);
+    return hashProjection(JSON.stringify(matchesFlatKeys ? { flatKeys: 1, paths: normalized } : normalized));
+}
+
+/**
+ * The fingerprint the same paths had before flat-key matching. A baseline
+ * carrying it is still comparable while neither side has a flat form (see
+ * plan.ts), since both matchings then strip the same keys.
+ */
+export function legacyFilterFingerprint(excludeKeys: ReadonlyArray<KeyPath>): string {
+    return hashProjection(JSON.stringify(sortedPaths(excludeKeys)));
+}
+
+function sortedPaths(excludeKeys: ReadonlyArray<KeyPath>): string[][] {
+    return excludeKeys.map((p) => [...p]).sort((a, b) => {
         const ka = JSON.stringify(a);
         const kb = JSON.stringify(b);
         return ka < kb ? -1 : ka > kb ? 1 : 0;
     });
-    return hashProjection(JSON.stringify(normalized));
 }
 
 /**
