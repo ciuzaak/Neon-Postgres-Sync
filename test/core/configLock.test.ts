@@ -126,3 +126,76 @@ test('a writer whose lock was taken over while it stalled does not write its sta
 
     assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['theirs']);
 });
+
+// ── Windows: transient EPERM/EACCES/EBUSY while another process holds or deletes a path ──
+
+/** Pretend to be Windows and make `fs[method]` fail with `code` for the first `times` calls matching `match`. */
+function withWindowsFaults<T>(method: 'mkdirSync' | 'renameSync', code: string, times: number, match: (p: string) => boolean, fn: () => T): { result?: T; error?: unknown; faults: number } {
+    const real = fs[method] as (...args: unknown[]) => unknown;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    let faults = 0;
+    (fs as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+        const target = String(method === 'renameSync' ? args[1] : args[0]);
+        if (match(target) && faults < times) {
+            faults++;
+            throw Object.assign(new Error(`${code}: operation not permitted, ${method} '${target}'`), { code });
+        }
+        return real.apply(fs, args);
+    };
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    try {
+        return { result: fn(), faults };
+    } catch (error) {
+        return { error, faults };
+    } finally {
+        (fs as unknown as Record<string, unknown>)[method] = real;
+        Object.defineProperty(process, 'platform', platform);
+    }
+}
+
+const addProfile = (store: ConfigFileStore, name: string) =>
+    store.update((c) => ({ ...c, profiles: [...c.profiles, { name, filePath: `~/${name}`, id: name, tableName: 't' }] }));
+
+test('Windows: a lock being deleted by another process (EPERM on mkdir) is waited for, not an error', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000 });
+    const r = withWindowsFaults('mkdirSync', 'EPERM', 3, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.equal(r.error, undefined, String(r.error));
+    assert.equal(r.faults, 3);
+    assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['a']);
+    assert.equal(fs.existsSync(`${configPath}.lock`), false);
+});
+
+test('Windows: an EPERM that persists past the lock deadline is rethrown as itself (a real permission problem)', () => {
+    const store = new ConfigFileStore(tmpConfig(), { lockWaitMs: 150 });
+    const r = withWindowsFaults('mkdirSync', 'EPERM', Infinity, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.equal((r.error as NodeJS.ErrnoException)?.code, 'EPERM');
+    assert.ok(!(r.error instanceof ConfigLockedError));
+});
+
+test('Windows: replacing the config while a reader has it open (EPERM/EBUSY on rename) is retried', () => {
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+        const configPath = tmpConfig();
+        const store = new ConfigFileStore(configPath, { lockWaitMs: 2000 });
+        addProfile(store, 'first');
+        const r = withWindowsFaults('renameSync', code, 2, (p) => path.basename(p) === 'neon-sync.json', () => addProfile(store, 'second'));
+        assert.equal(r.error, undefined, `${code}: ${String(r.error)}`);
+        assert.equal(r.faults, 2, code);
+        assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['first', 'second'], code);
+        assert.deepEqual(fs.readdirSync(path.dirname(configPath)).filter((f) => f.endsWith('.tmp')), [], `${code}: no temp file left`);
+    }
+});
+
+test('the same errors are not retried on other platforms, nor other codes on Windows', () => {
+    const { retryWindowsTransient } = require('../../src/core/localFile') as typeof import('../../src/core/localFile');
+    const failing = (code: string) => { let n = 0; return { fn: () => { n++; throw Object.assign(new Error(code), { code }); }, calls: () => n }; };
+    for (const [platform, code] of [['linux', 'EPERM'], ['darwin', 'EBUSY'], ['win32', 'ENOENT'], ['win32', 'ENOSPC']] as const) {
+        const f = failing(code);
+        assert.throws(() => retryWindowsTransient(f.fn, platform, 500), { code });
+        assert.equal(f.calls(), 1, `${platform} ${code}`);
+    }
+    const f = failing('EBUSY');
+    const started = Date.now();
+    assert.throws(() => retryWindowsTransient(f.fn, 'win32', 120), { code: 'EBUSY' });
+    assert.ok(f.calls() > 1 && Date.now() - started < 1000, 'retried, but bounded');
+});

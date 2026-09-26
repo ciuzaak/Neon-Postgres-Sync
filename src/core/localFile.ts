@@ -88,6 +88,34 @@ function resolveWriteTarget(absolutePath: string): string {
  * - A directory that can't take the temp file fails the write rather than
  *   falling back to an in-place write, which could leave a fragment.
  */
+export function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Errors Windows returns for a moment while another process has the path
+ * open or is deleting it (a directory being removed stays "delete pending";
+ * antivirus scanners open freshly written files). Elsewhere they are real.
+ */
+const WINDOWS_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export function isWindowsTransient(e: unknown, platform: NodeJS.Platform = process.platform): boolean {
+    return platform === 'win32' && WINDOWS_TRANSIENT.has((e as NodeJS.ErrnoException)?.code ?? '');
+}
+
+/** Run `fn`, retrying Windows' transient errors for up to `waitMs`; anything else (or on other platforms) throws at once. */
+export function retryWindowsTransient<T>(fn: () => T, platform: NodeJS.Platform = process.platform, waitMs = 2000): T {
+    const deadline = Date.now() + waitMs;
+    for (let delay = 10; ; delay = Math.min(delay * 2, 100)) {
+        try {
+            return fn();
+        } catch (e) {
+            if (!isWindowsTransient(e, platform) || Date.now() + delay > deadline) throw e;
+            sleepSync(delay);
+        }
+    }
+}
+
 export function writeFileAtomic(absolutePath: string, content: string): void {
     const target = resolveWriteTarget(absolutePath);
     let mode: number | undefined;
@@ -99,7 +127,8 @@ export function writeFileAtomic(absolutePath: string, content: string): void {
     try {
         fs.writeFileSync(temp, content, mode === undefined ? undefined : { mode });
         if (mode !== undefined) fs.chmodSync(temp, mode);
-        fs.renameSync(temp, target);
+        // (A read-only target was refused above, so a retried EPERM here is contention.)
+        retryWindowsTransient(() => fs.renameSync(temp, target));
     } catch (e) {
         try { fs.unlinkSync(temp); } catch { /* swallow: may not exist */ }
         throw e;

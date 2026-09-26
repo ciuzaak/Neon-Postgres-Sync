@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { writeFileAtomic } from './localFile';
+import { isWindowsTransient, retryWindowsTransient, sleepSync, writeFileAtomic } from './localFile';
 import type { ConfigFile, Profile } from './types';
 
 export const CONFIG_FILENAME = 'neon-sync.json';
@@ -25,10 +25,6 @@ const LOCK_STALE_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
 const OWNER_FILE = 'owner';
 
-function sleepSync(ms: number): void {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 /** Age of a path in ms, or undefined if it doesn't exist (anymore). */
 function ageOf(p: string): number | undefined {
     try {
@@ -37,6 +33,9 @@ function ageOf(p: string): number | undefined {
         return undefined;
     }
 }
+
+/** Lock removal retries Windows' EBUSY/EPERM (a scanner or another process briefly holding it). */
+const RM_LOCK = { recursive: true, force: true, maxRetries: 5, retryDelay: 20 } as const;
 
 /**
  * Run `fn` holding `<file>.lock`, a directory (mkdir is atomic everywhere)
@@ -50,24 +49,35 @@ function ageOf(p: string): number | undefined {
  * - Locks are removed recursively (a Finder `.DS_Store` inside one, or a
  *   plain file in its place, must not wedge every writer).
  * - Every retry sleeps and checks the deadline: waiting is bounded.
+ * - On Windows, creating the lock while another process is removing it
+ *   fails with EPERM/EACCES ("delete pending") rather than EEXIST: that is
+ *   treated as busy too, but if it persists to the deadline it is rethrown
+ *   (it may be a real permission problem, which callers handle as such).
  */
 function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => boolean) => T): T {
     const lock = `${filePath}.lock`;
     const takeover = `${lock}.takeover`;
     const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const deadline = Date.now() + waitMs;
+    let transient: unknown;
     for (;;) {
         try {
             fs.mkdirSync(lock);
             try {
                 fs.writeFileSync(`${lock}/${OWNER_FILE}`, token);
             } catch (e) {
-                fs.rmSync(lock, { recursive: true, force: true });
+                fs.rmSync(lock, RM_LOCK);
                 throw e;
             }
             break;
         } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+            if (isWindowsTransient(e)) {
+                transient = e;
+            } else if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+                throw e;
+            } else {
+                transient = undefined;
+            }
         }
 
         const age = ageOf(lock);
@@ -77,21 +87,21 @@ function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => bo
                 try {
                     const again = ageOf(lock);
                     if (again !== undefined && again > LOCK_STALE_MS) {
-                        fs.rmSync(lock, { recursive: true, force: true });
+                        fs.rmSync(lock, RM_LOCK);
                     }
                 } finally {
-                    fs.rmSync(takeover, { recursive: true, force: true });
+                    fs.rmSync(takeover, RM_LOCK);
                 }
                 continue; // retry the mkdir right away
             } catch (e) {
-                if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+                if ((e as NodeJS.ErrnoException).code !== 'EEXIST' && !isWindowsTransient(e)) throw e;
                 // Someone else is taking over; a takeover mutex left by a crash mid-takeover is itself stale.
                 const tAge = ageOf(takeover);
-                if (tAge !== undefined && tAge > LOCK_STALE_MS) fs.rmSync(takeover, { recursive: true, force: true });
+                if (tAge !== undefined && tAge > LOCK_STALE_MS) fs.rmSync(takeover, RM_LOCK);
             }
         }
 
-        if (Date.now() > deadline) throw new ConfigLockedError(lock);
+        if (Date.now() > deadline) throw transient ?? new ConfigLockedError(lock);
         sleepSync(25);
     }
     const stillOwned = () => {
@@ -106,7 +116,7 @@ function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => bo
     } finally {
         try {
             if (stillOwned()) {
-                fs.rmSync(lock, { recursive: true, force: true });
+                fs.rmSync(lock, RM_LOCK);
             }
         } catch { /* already gone, or taken over */ }
     }
@@ -141,7 +151,8 @@ export class ConfigFileStore {
         }
         let parsed: unknown;
         try {
-            parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+            // (On Windows a read can briefly fail while another writer renames over the file.)
+            parsed = JSON.parse(retryWindowsTransient(() => fs.readFileSync(this.filePath, 'utf-8')));
         } catch (e) {
             throw new ConfigFileReadError(this.filePath, e);
         }
@@ -232,7 +243,7 @@ export function atomicWriteJson(targetPath: string, value: unknown): void {
     const tempPath = `${targetPath}.${process.pid}.tmp`;
     fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
     try {
-        fs.renameSync(tempPath, targetPath);
+        retryWindowsTransient(() => fs.renameSync(tempPath, targetPath));
     } catch (error) {
         // Best-effort cleanup; rethrow so callers see the failure.
         try { fs.unlinkSync(tempPath); } catch { /* swallow */ }
