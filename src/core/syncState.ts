@@ -92,7 +92,8 @@ type EntryRead =
  * different format version is never overwritten.
  */
 export class SyncStateStore {
-    constructor(public readonly dir: string) {}
+    /** `transientRetryMs`: per-write budget for Windows' transient file errors. */
+    constructor(public readonly dir: string, private readonly transientRetryMs?: number) {}
 
     get(key: SyncStateKey): SyncBaseline | undefined {
         const read = this.read(key);
@@ -106,7 +107,7 @@ export class SyncStateStore {
             throw new Error(`Sync state for "${entry.id}" is unreadable: ${this.fileFor(entry)}`);
         }
         fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-        atomicWriteJson(this.fileFor(entry), { version: STATE_FORMAT_VERSION, entry });
+        atomicWriteJson(this.fileFor(entry), { version: STATE_FORMAT_VERSION, entry }, this.transientRetryMs);
     }
 
     delete(key: SyncStateKey): void {

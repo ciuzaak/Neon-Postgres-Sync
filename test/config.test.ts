@@ -415,6 +415,27 @@ test('a read-only shared config (e.g. home-manager) stays in use; profiles only 
     }
 });
 
+test('Windows: an EPERM rename on an existing shared config (e.g. held by OneDrive) is retried next launch, not marked read-only for good', async () => {
+    const { ConfigManager, legacyPath } = setupMigration({ profiles: [P('legacyOnly')] }, { profiles: [P('shared')] });
+    const realRename = fs.renameSync;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+        (fs as unknown as Record<string, unknown>).renameSync = (from: fs.PathLike, to: fs.PathLike) => {
+            if (path.basename(String(to)) === 'neon-sync.json') throw Object.assign(new Error('EPERM: injected'), { code: 'EPERM', syscall: 'rename' });
+            return realRename(from, to);
+        };
+        Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+        assert.equal(await ConfigManager.migrateLegacyConfig(), undefined);
+        assert.equal(fs.existsSync(`${legacyPath}.migrated`), false, 'no permanent marker');
+    } finally {
+        (fs as unknown as Record<string, unknown>).renameSync = realRename;
+        Object.defineProperty(process, 'platform', platform);
+    }
+    // Next launch, with the file free again, the profile moves.
+    const report = await ConfigManager.migrateLegacyConfig();
+    assert.deepEqual(report?.added, ['legacyOnly']);
+});
+
 test('a busy lock on the very first migration shows this editor\'s profiles (read-only) for the session', async () => {
     const { ConfigManager, sharedPath, vscode } = setupMigration({ profiles: [P('a')] });
     fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
