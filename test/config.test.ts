@@ -269,7 +269,7 @@ test('migration merges by name: keeps the shared version on conflicts and skips 
 
     const report = await ConfigManager.migrateLegacyConfig();
 
-    assert.deepEqual(report, { added: ['fresh'], keptShared: ['differs'], skippedSameFile: ['alias'] });
+    assert.deepEqual(report, { added: ['fresh'], keptShared: ['differs'], skippedSameFile: ['alias'], skippedInvalid: [] });
     assert.deepEqual(readShared().profiles.map((p) => [p.name, p.filePath]), [
         ['same', '~/same.json'], ['differs', '~/one.json'], ['existing', '~/shared-file.json'], ['fresh', '~/fresh.json']
     ]);
@@ -285,7 +285,7 @@ test('a corrupt shared file aborts migration without a marker; this editor keeps
 
     assert.equal(fs.existsSync(`${legacyPath}.migrated`), false);
     assert.equal(fs.readFileSync(sharedPath, 'utf-8'), '{ broken');
-    assert.match(vscode.window.errorMessages.at(-1)!, /couldn't move profiles to the shared config: .*keeps using its own profile list/);
+    assert.match(vscode.window.errorMessages.at(-1)!, /couldn't move profiles to the shared config .*this editor shows its own profile list \(read-only\)/);
     assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['a']);
 });
 
@@ -327,4 +327,68 @@ test('without a legacy file there is nothing to migrate', async () => {
     const { ConfigManager, sharedPath } = setupMigration(undefined);
     assert.equal(await ConfigManager.migrateLegacyConfig(), undefined);
     assert.equal(fs.existsSync(sharedPath), false);
+});
+
+test('while migration is blocked by a corrupt shared file, profile edits are refused (they would be lost later)', async () => {
+    const { ConfigManager, vscode, legacyPath } = setupMigration({ profiles: [P('a')] }, '{ broken');
+    await ConfigManager.migrateLegacyConfig();
+
+    assert.equal(ConfigManager.updateProfiles((ps) => [...ps, P('b')]), undefined);
+
+    assert.match(vscode.window.errorMessages.at(-1)!, /can't be edited until the shared config .* is fixed/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(legacyPath, 'utf-8')).profiles.map((p: Profile) => p.name), ['a']);
+});
+
+test('incomplete legacy profiles are skipped and reported; the rest still migrate', async () => {
+    const legacy = { profiles: [P('a'), { name: 'stub', id: 'x', tableName: 'records' }, P('c'), null] };
+    const { ConfigManager, vscode, readShared } = setupMigration(legacy);
+
+    const report = await ConfigManager.migrateLegacyConfig();
+
+    assert.deepEqual(report?.added, ['a', 'c']);
+    assert.deepEqual(report?.skippedInvalid, ['stub', '#4']);
+    assert.deepEqual(readShared().profiles.map((p) => p.name), ['a', 'c']);
+    assert.match(vscode.window.infoMessages.at(-1)!, /Skipped \(incomplete, left in the old file\): stub, #4\./);
+});
+
+test('a busy config lock postpones migration (no fallback, no marker) instead of failing it', async () => {
+    const { ConfigManager, vscode, legacyPath, sharedPath } = setupMigration({ profiles: [P('a')] });
+    fs.mkdirSync(`${sharedPath}.lock`);
+
+    assert.equal(await ConfigManager.migrateLegacyConfig(), undefined);
+
+    assert.equal(fs.existsSync(`${legacyPath}.migrated`), false);
+    assert.match(vscode.window.warningMessages.at(-1)!, /will move this editor's profiles to the shared config next time/);
+    fs.rmdirSync(`${sharedPath}.lock`);
+    assert.deepEqual((await ConfigManager.migrateLegacyConfig())?.added, ['a'], 'retried later');
+});
+
+test('Open Settings (JSON) opens the shared file even when it is corrupt', async () => {
+    const { ConfigManager, vscode, sharedPath } = setupMigration(undefined, '{ broken');
+    const opened: string[] = [];
+    vscode.workspace.openTextDocument = async (input: string | { fsPath: string }) => {
+        opened.push(typeof input === 'string' ? input : input.fsPath);
+        return {};
+    };
+
+    await ConfigManager.openConfigFile();
+
+    assert.deepEqual(opened, [sharedPath]);
+    assert.equal(fs.readFileSync(sharedPath, 'utf-8'), '{ broken');
+});
+
+test('setting the URL works with a read-only config directory', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+    const { ConfigManager, secrets, sharedPath } = setupMigration(undefined, { profiles: [P('a')] });
+    fs.chmodSync(path.dirname(sharedPath), 0o555);
+    try {
+        let notified = 0;
+        ConfigManager.onConnectionStringChanged(() => { notified += 1; });
+        await ConfigManager.setConnectionString('postgres://new');
+        await ConfigManager.clearConnectionString();
+        assert.equal(notified, 2);
+        assert.equal(secrets.values.has('neonSync.connectionString'), false);
+        assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['a']);
+    } finally {
+        fs.chmodSync(path.dirname(sharedPath), 0o755);
+    }
 });

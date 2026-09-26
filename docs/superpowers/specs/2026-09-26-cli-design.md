@@ -60,6 +60,8 @@ A row is applied **without an explicit per-row decision** only when the directio
 - Directories are created `0700`. `neon-sync.json` is written atomically **through the same symlink-following write as local files** (`core/localFile.writeFileAtomic`), so a config managed by stow/chezmoi/home-manager stays a link; a read-only config (e.g. home-manager in the Nix store) is supported for reading, and writes fail with a clear message.
 - **Every writer takes the config lock** (`neon-sync.json.lock`, created with `mkdir`, stale after 10 s) and applies its change to a **fresh read**: `ConfigFileStore.update(fn)`. The settings panel's add/edit/delete, CLI `profile add/remove/rename`, the legacy-secret cleanup and the migration all go through it — so concurrent edits from two hosts merge instead of the last full-list write winning.
 - `update` **refuses a corrupt or unreadable config** (error naming the file) instead of treating it as empty — a hand-editing typo plus one save must never wipe every profile. (Previously `saveProfiles` overwrote a corrupt file.)
+- `update` first evaluates the change without the lock; a no-op takes no lock and writes nothing (a read-only config directory keeps working for everything that doesn't write).
+- Lock details (after review): the lock directory holds an owner token and is released only by its owner; a stale lock (> 10 s, e.g. after a crash) is taken over under a second `…lock.takeover` mutex that re-checks staleness, so two waiters can't both take it over; locks are removed recursively (a `.DS_Store` inside must not wedge writers); every wait is bounded (5 s for the CLI, 2 s for the extension host, which blocks while waiting).
 - An edit keyed by a profile's original name that no longer exists on the fresh read (renamed/removed by the other host meanwhile) is reported, not re-added.
 - Not configurable by design: a relocated `XDG_CONFIG_HOME` is ignored (documented). `--config <file>` lets a single CLI run use another profiles file (scripts, experiments); sync state stays machine-local either way.
 - **Remote-SSH / devcontainers:** the extension then runs on the remote machine, with that machine's config and state — correct (different machines), but its profile list differs from the local CLI's; documented.
@@ -75,7 +77,9 @@ Runs once per `globalStorage` location, on activation, before anything reads pro
 3. **Create or merge, under the config lock** (see *Where*):
    - shared file missing → write the old profiles;
    - shared file present and valid → merge by name: add profiles it lacks, skipping any whose file resolves to the same file as an existing profile (they would clash); for a name in both with different fields, keep the shared one;
-   - shared file present but unreadable/corrupt → **abort** migration (no marker), show an error with the path; the extension keeps working from the old file until fixed.
+   - shared file present but unreadable/corrupt → **abort** migration (no marker), show an error with the path; the extension shows the old file's profiles **read-only** until it's fixed (edits there would be lost when the fixed shared file wins the merge);
+   - config lock busy → postpone (no marker, no fallback), retry next launch;
+   - incomplete legacy entries (missing name/file/id/table) are skipped and named in the notification, left in the backup.
 4. **Tell the user what changed:** one notification naming profiles added from this editor (`vscode.env.appName`), kept-shared conflicts, and skipped clashes. (A late-migrating editor can re-add a profile deleted elsewhere — surfacing the added names makes that visible.)
 5. The old file stays as a backup (secret-free after step 1) and is never read again.
 

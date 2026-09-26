@@ -23,38 +23,85 @@ export class ConfigLockedError extends Error {
 
 const LOCK_STALE_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
+const OWNER_FILE = 'owner';
 
 function sleepSync(ms: number): void {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Age of a path in ms, or undefined if it doesn't exist (anymore). */
+function ageOf(p: string): number | undefined {
+    try {
+        return Date.now() - fs.statSync(p).mtimeMs;
+    } catch {
+        return undefined;
+    }
+}
+
 /**
- * Run `fn` holding `<file>.lock` (a directory: mkdir is atomic everywhere).
- * A lock older than LOCK_STALE_MS is presumed abandoned by a crashed writer.
+ * Run `fn` holding `<file>.lock`, a directory (mkdir is atomic everywhere)
+ * holding a random owner token.
+ *
+ * - A lock older than LOCK_STALE_MS is presumed abandoned by a crashed
+ *   writer. Taking it over happens under a second mutex (`<lock>.takeover`)
+ *   and re-checks staleness inside it, so two waiters can't both remove the
+ *   stale lock and then remove each other's fresh one.
+ * - Release removes the lock only while it still holds our token.
+ * - Locks are removed recursively (a Finder `.DS_Store` inside one, or a
+ *   plain file in its place, must not wedge every writer).
+ * - Every retry sleeps and checks the deadline: waiting is bounded.
  */
 function withLock<T>(filePath: string, waitMs: number, fn: () => T): T {
     const lock = `${filePath}.lock`;
+    const takeover = `${lock}.takeover`;
+    const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const deadline = Date.now() + waitMs;
     for (;;) {
         try {
             fs.mkdirSync(lock);
+            try {
+                fs.writeFileSync(`${lock}/${OWNER_FILE}`, token);
+            } catch (e) {
+                fs.rmSync(lock, { recursive: true, force: true });
+                throw e;
+            }
             break;
         } catch (e) {
             if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
         }
-        try {
-            if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
-                fs.rmdirSync(lock);
-                continue;
+
+        const age = ageOf(lock);
+        if (age !== undefined && age > LOCK_STALE_MS) {
+            try {
+                fs.mkdirSync(takeover);
+                try {
+                    const again = ageOf(lock);
+                    if (again !== undefined && again > LOCK_STALE_MS) {
+                        fs.rmSync(lock, { recursive: true, force: true });
+                    }
+                } finally {
+                    fs.rmSync(takeover, { recursive: true, force: true });
+                }
+                continue; // retry the mkdir right away
+            } catch (e) {
+                if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+                // Someone else is taking over; a takeover mutex left by a crash mid-takeover is itself stale.
+                const tAge = ageOf(takeover);
+                if (tAge !== undefined && tAge > LOCK_STALE_MS) fs.rmSync(takeover, { recursive: true, force: true });
             }
-        } catch { /* released meanwhile: retry */ continue; }
+        }
+
         if (Date.now() > deadline) throw new ConfigLockedError(lock);
         sleepSync(25);
     }
     try {
         return fn();
     } finally {
-        try { fs.rmdirSync(lock); } catch { /* already gone */ }
+        try {
+            if (fs.readFileSync(`${lock}/${OWNER_FILE}`, 'utf-8') === token) {
+                fs.rmSync(lock, { recursive: true, force: true });
+            }
+        } catch { /* already gone, or taken over */ }
     }
 }
 
@@ -103,8 +150,14 @@ export class ConfigFileStore {
      * result (profiles normalized). A missing file starts as `{ profiles: [] }`;
      * a corrupt one throws ConfigFileReadError and is left untouched. Return
      * undefined from `mutate` to write nothing. Returns what was written.
+     *
+     * `mutate` runs once without the lock first: if it wants no change,
+     * nothing is locked, created or written (so a read-only config directory
+     * works for everything that doesn't write). It then runs again on the
+     * locked fresh read — it must not depend on having run before.
      */
     update(mutate: (config: ConfigFile) => ConfigFile | undefined): ConfigFile | undefined {
+        if (mutate(structuredClone(this.read() ?? { profiles: [] })) === undefined) return undefined;
         fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
         return withLock(this.filePath, this.opts.lockWaitMs ?? LOCK_WAIT_MS, () => {
             const current = this.read() ?? { profiles: [] };
@@ -130,10 +183,16 @@ export class ConfigFileStore {
         });
     }
 
-    /** Creates the file with `initial` if missing. Returns true when it was created. */
+    /**
+     * Creates the file with `initial` if missing. Returns true when it was
+     * created. An existing file is never read (it may be the corrupt one the
+     * user is about to open and fix).
+     */
     ensureExists(initial: ConfigFile): boolean {
+        if (this.exists()) return false;
         let created = false;
         this.update((config) => {
+            created = false; // update may call this twice (dry run, then locked)
             if (this.exists()) return undefined;
             created = true;
             return { ...config, ...initial };

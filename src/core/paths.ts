@@ -58,13 +58,17 @@ export function expandHome(filePath: string, p: Pick<PathEnv, 'platform' | 'home
     return filePath;
 }
 
-/** `~`-abbreviated form of an absolute path under the home directory, for display and storage. */
+/**
+ * `~`-abbreviated form of an absolute path under the home directory, for
+ * display and storage. Always `~/` with forward slashes — the one form every
+ * platform's expandHome accepts.
+ */
 export function abbreviateHome(absolutePath: string, p: Pick<PathEnv, 'platform' | 'home'> = currentPathEnv()): string {
     const impl = p.platform === 'win32' ? path.win32 : path.posix;
     const rel = impl.relative(p.home, absolutePath);
     if (rel === '') return '~';
     if (rel.startsWith('..') || impl.isAbsolute(rel)) return absolutePath;
-    return p.platform === 'win32' ? `~\\${rel}` : `~/${rel}`;
+    return `~/${rel.split(impl.sep).join('/')}`;
 }
 
 /**

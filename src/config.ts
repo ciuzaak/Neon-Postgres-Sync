@@ -25,6 +25,20 @@ export interface MigrationReport {
     added: string[];
     keptShared: string[];
     skippedSameFile: string[];
+    /** Entries missing a name, file, id or table: left in the backup, not copied. */
+    skippedInvalid: string[];
+}
+
+/** The extension host must never freeze long on the config lock. */
+const EXTENSION_LOCK_WAIT_MS = 2_000;
+
+function isCompleteProfile(value: unknown): value is Profile {
+    const p = value as Partial<Profile> | null;
+    return typeof p === 'object' && p !== null
+        && typeof p.name === 'string' && p.name.trim() !== ''
+        && typeof p.filePath === 'string' && p.filePath.trim() !== ''
+        && typeof p.id === 'string' && p.id.trim() !== ''
+        && typeof p.tableName === 'string' && p.tableName.trim() !== '';
 }
 
 export class ConfigManager {
@@ -32,7 +46,11 @@ export class ConfigManager {
     private static globalStorageUri: vscode.Uri | undefined;
     private static secrets: vscode.SecretStorage | undefined;
     private static locations: SharedLocations | undefined;
-    /** Set when migration couldn't run because the shared file is unreadable: keep using this editor's old file. */
+    /**
+     * Set when migration couldn't complete (e.g. the shared file is corrupt):
+     * this session reads this editor's old file, read-only — edits made there
+     * would be lost once the shared file is fixed and migration merges.
+     */
     private static legacyFallback = false;
     private static readonly connectionStringListeners = new Set<() => void>();
 
@@ -64,11 +82,17 @@ export class ConfigManager {
     }
 
     private static sharedStore(): ConfigFileStore | undefined {
-        return this.locations && new ConfigFileStore(path.join(this.locations.configDir, CONFIG_FILENAME));
+        return this.locations && new ConfigFileStore(
+            path.join(this.locations.configDir, CONFIG_FILENAME),
+            { lockWaitMs: EXTENSION_LOCK_WAIT_MS }
+        );
     }
 
     private static legacyStore(): ConfigFileStore | undefined {
-        return this.globalStorageUri && new ConfigFileStore(path.join(this.globalStorageUri.fsPath, CONFIG_FILENAME));
+        return this.globalStorageUri && new ConfigFileStore(
+            path.join(this.globalStorageUri.fsPath, CONFIG_FILENAME),
+            { lockWaitMs: EXTENSION_LOCK_WAIT_MS }
+        );
     }
 
     private static getStore(): ConfigFileStore | undefined {
@@ -106,36 +130,47 @@ export class ConfigManager {
             legacy.removeConnectionString();
         }
 
-        const report: MigrationReport = { added: [], keptShared: [], skippedSameFile: [] };
-        const fileKey = (p: Profile) => samePathKey(resolveProfilePath(p.filePath, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath));
+        const report: MigrationReport = { added: [], keptShared: [], skippedSameFile: [], skippedInvalid: [] };
+        const incoming = Array.isArray(old.profiles) ? old.profiles : [];
+        const complete = incoming.filter(isCompleteProfile);
+        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const fileKey = (p: Profile) => samePathKey(resolveProfilePath(p.filePath, workspace));
         try {
             shared.update((config) => {
                 report.added = [];
                 report.keptShared = [];
                 report.skippedSameFile = [];
-                for (const incoming of old.profiles ?? []) {
-                    const sameName = config.profiles.find((p) => p.name === incoming.name);
+                report.skippedInvalid = incoming.flatMap((p, i) => isCompleteProfile(p)
+                    ? []
+                    : [(typeof (p as Partial<Profile> | null)?.name === 'string' && (p as Profile).name) || `#${i + 1}`]);
+                for (const profile of complete) {
+                    const sameName = config.profiles.find((p) => p.name === profile.name);
                     if (sameName) {
                         const a = JSON.stringify(normalizeProfileForWrite(sameName));
-                        const b = JSON.stringify(normalizeProfileForWrite(incoming));
-                        if (a !== b) report.keptShared.push(incoming.name);
+                        const b = JSON.stringify(normalizeProfileForWrite(profile));
+                        if (a !== b) report.keptShared.push(profile.name);
                         continue;
                     }
-                    if (config.profiles.some((p) => fileKey(p) === fileKey(incoming))) {
-                        report.skippedSameFile.push(incoming.name);
+                    if (config.profiles.some((p) => isCompleteProfile(p) && fileKey(p) === fileKey(profile))) {
+                        report.skippedSameFile.push(profile.name);
                         continue;
                     }
-                    config.profiles.push(incoming);
-                    report.added.push(incoming.name);
+                    config.profiles.push(profile);
+                    report.added.push(profile.name);
                 }
                 return report.added.length > 0 || !shared.exists() ? config : undefined;
             });
         } catch (e) {
-            if (!(e instanceof ConfigFileReadError) && !(e instanceof ConfigLockedError)) throw e;
+            if (e instanceof ConfigLockedError) {
+                // Busy, not broken: keep using the shared file; retry next launch.
+                vscode.window.showWarningMessage(`Neon Sync will move this editor's profiles to the shared config next time: ${e.message}`);
+                return undefined;
+            }
             this.legacyFallback = true;
+            const reason = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(
-                `Neon Sync couldn't move profiles to the shared config: ${e.message} ` +
-                'Fix or remove that file; until then this editor keeps using its own profile list.'
+                `Neon Sync couldn't move profiles to the shared config ${abbreviateHome(shared.filePath)}: ${reason} ` +
+                'Until that is fixed, this editor shows its own profile list (read-only).'
             );
             return undefined;
         }
@@ -146,11 +181,12 @@ export class ConfigManager {
             editor: vscode.env?.appName
         }, null, 2));
 
-        if (report.added.length + report.keptShared.length + report.skippedSameFile.length > 0) {
+        if (report.added.length + report.keptShared.length + report.skippedSameFile.length + report.skippedInvalid.length > 0) {
             const parts = [`Neon Sync now keeps profiles in ${abbreviateHome(shared.filePath)}, shared with the neon-sync CLI and your other editors.`];
             if (report.added.length) parts.push(`Added from ${vscode.env?.appName ?? 'this editor'}: ${report.added.join(', ')}.`);
             if (report.keptShared.length) parts.push(`Kept the shared version of: ${report.keptShared.join(', ')}.`);
             if (report.skippedSameFile.length) parts.push(`Skipped (same file as an existing profile): ${report.skippedSameFile.join(', ')}.`);
+            if (report.skippedInvalid.length) parts.push(`Skipped (incomplete, left in the old file): ${report.skippedInvalid.join(', ')}.`);
             vscode.window.showInformationMessage(parts.join(' '));
         }
         return report;
@@ -250,12 +286,12 @@ export class ConfigManager {
         }
     }
 
+    /** Best-effort cleanup of the legacy plaintext field; never blocks setting or clearing the secret. */
     private static async removeConnectionStringFromFile() {
         try {
             this.getStore()?.removeConnectionString();
         } catch (e) {
-            if (!(e instanceof ConfigFileReadError) && !(e instanceof ConfigLockedError)) throw e;
-            vscode.window.showErrorMessage(e.message);
+            vscode.window.showErrorMessage(`Couldn't clean up ${CONFIG_FILENAME}: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
@@ -270,6 +306,12 @@ export class ConfigManager {
         const store = this.getStore();
         if (!store) {
             vscode.window.showErrorMessage('Extension not initialized correctly.');
+            return undefined;
+        }
+        if (this.legacyFallback) {
+            vscode.window.showErrorMessage(
+                `Profiles can't be edited until the shared config ${this.sharedStore() ? abbreviateHome(this.sharedStore()!.filePath) : ''} is fixed (it couldn't be read at startup). Reload the window after fixing it.`
+            );
             return undefined;
         }
         try {
@@ -291,7 +333,8 @@ export class ConfigManager {
     }
 
     static async openConfigFile(): Promise<void> {
-        const store = this.getStore();
+        // Always the shared file — also when it's the corrupt one to fix.
+        const store = this.sharedStore();
         if (!store) {
             vscode.window.showErrorMessage('Extension not initialized correctly.');
             return;

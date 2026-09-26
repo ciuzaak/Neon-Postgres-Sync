@@ -162,8 +162,7 @@ test('pickFilePath returns a ~/ path for a file under the home directory, even i
 
     const reply = findReply(panel, 'filePathPicked');
     assert.ok(reply);
-    const rel = path.relative(home, chosen);
-    assert.equal(reply!.path, process.platform === 'win32' ? `~\\${rel}` : `~/${rel}`);
+    assert.equal(reply!.path, `~/${path.relative(home, chosen).split(path.sep).join('/')}`);
 });
 
 test('pickFilePath expands ~ in the current value for the dialog default', async () => {

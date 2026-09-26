@@ -46,7 +46,8 @@ test('abbreviateHome: ~ form under home, absolute elsewhere; round-trips with ex
     assert.equal(abbreviateHome('/home/me', linux), '~');
     assert.equal(abbreviateHome('/home/meow/x', linux), '/home/meow/x');
     assert.equal(abbreviateHome('/etc/hosts', linux), '/etc/hosts');
-    assert.equal(abbreviateHome('C:\\Users\\me\\x\\y.json', win), '~\\x\\y.json');
+    assert.equal(abbreviateHome('C:\\Users\\me\\x\\y.json', win), '~/x/y.json', 'portable ~/ form on Windows too');
+    assert.equal(expandHome('~/x/y.json', win), 'C:\\Users\\me\\x\\y.json');
     assert.equal(abbreviateHome('D:\\x.json', win), 'D:\\x.json');
     for (const p of ['/home/me/a/b', '/home/me']) {
         assert.equal(expandHome(abbreviateHome(p, linux), linux), p);
