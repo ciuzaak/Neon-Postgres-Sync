@@ -3,7 +3,7 @@ import { candidateFor } from '../../../src/core/plan';
 import type { SyncDirection } from '../../../src/core/types';
 import { Choice, CliContext, EXIT, ExitCode, UsageError, worstExit } from '../context';
 import { Host } from '../host';
-import { overwritesUnreviewed } from '../policy';
+import { forcedNeedsDecision, sourceMissing as missingSource } from '../policy';
 import { diffFor } from './diff';
 import { planRows, type Row, type Ui } from './status';
 
@@ -40,12 +40,9 @@ interface Pending {
 
 const FORCED: Record<ApplyMode, SyncDirection | undefined> = { sync: undefined, pull: 'download', push: 'upload' };
 
-/** The side a direction reads from must exist, or the destination would be overwritten with nothing. */
+/** A row's source side is missing (see policy.sourceMissing). */
 function sourceMissing(row: Row, direction: SyncDirection): string | undefined {
-    const plan = row.plan!;
-    if (direction === 'upload' && !plan.localExists) return 'there is no local file to upload';
-    if (direction === 'download' && !plan.remoteExists) return 'there is no remote record to download';
-    return undefined;
+    return missingSource(row.plan!, direction);
 }
 
 function sideName(direction: SyncDirection): string {
@@ -100,11 +97,16 @@ export async function applyCommand(
             const missing = sourceMissing(row, forced);
             if (missing) {
                 decisions.push({ row, action: 'none', why: `can't ${mode}: ${missing}`, code: EXIT.stuck });
-            } else if (overwritesUnreviewed(row.plan!, forced)) {
-                const lost = row.plan!.change === 'unknown'
-                    ? `may overwrite unreviewed ${sideName(forced === 'upload' ? 'download' : 'upload')} changes (no sync history)`
-                    : `overwrites ${sideName(forced === 'upload' ? 'download' : 'upload')} changes made since the last sync`;
-                pending.push({ row, direction: forced, needsAnswer: !opts.force, how: 'forced', reason: lost });
+            } else if (forcedNeedsDecision(row.plan!, forced)) {
+                // --force skips the question only unattended (with --yes); in a
+                // terminal every such row is still confirmed one by one.
+                pending.push({
+                    row,
+                    direction: forced,
+                    needsAnswer: !(opts.force && opts.yes),
+                    how: 'forced',
+                    reason: forcedNeedsDecision(row.plan!, forced)!
+                });
             } else {
                 pending.push({ row, direction: forced, needsAnswer: false, how: 'forced', reason: cls.label });
             }
@@ -140,7 +142,7 @@ export async function applyCommand(
             how = p.needsAnswer ? 'chosen' : p.how;
         } else if (p.needsAnswer) {
             const hint = forced
-                ? `add --force to overwrite (${p.reason})`
+                ? `${p.reason}; confirm it in a terminal, or add --force --yes`
                 : `${p.reason}; decide interactively, or \`neon-sync sync ${p.row.profile.name} --prefer local|remote --yes\``;
             decisions.push({ row: p.row, action: 'skip', why: `needs a decision: ${hint}`, code: EXIT.pending });
             continue;
@@ -217,8 +219,13 @@ async function askUser(ctx: CliContext, host: Host, mode: ApplyMode, pending: Pe
             if (answer === undefined) return undefined;
             if (answer === 'skip') break;
             if (answer === 'diff') {
-                const d = p.direction ?? plan.suggestion.direction;
-                ctx.stdout.write((diffFor(host, p.row, d, ui) || '(no differences)\n') + '\n');
+                // The diff of every direction offered, so neither choice is blind.
+                const directions = options.map((o) => o.value).filter((v): v is SyncDirection => v === 'upload' || v === 'download');
+                const text = directions
+                    .map((d) => `${ui.style.bold(`If you ${d}:`)}\n${diffFor(host, p.row, d, ui) || '(no differences)\n'}`)
+                    .join('\n');
+                const tall = ctx.stdout.rows !== undefined && text.split('\n').length > ctx.stdout.rows;
+                if (!(tall && ctx.page(text))) ctx.stdout.write(text + '\n');
                 continue;
             }
             out.set(p.row, answer as SyncDirection);
@@ -264,8 +271,10 @@ function report(
         switch (o.kind) {
             case 'ok':
                 codes.push(EXIT.ok);
-                json.push({ name, kind: 'applied', direction: d.direction });
-                lines.push(`  ${arrow}  ${name}  ${verb(d.direction)}`);
+                json.push({ name, kind: 'applied', direction: d.direction, ...(o.baselineError ? { baselineError: o.baselineError } : {}) });
+                lines.push(`  ${arrow}  ${name}  ${verb(d.direction)}` + (o.baselineError
+                    ? style.yellow(` (couldn't record sync history: ${o.baselineError} — the next sync may ask about this profile)`)
+                    : ''));
                 break;
             case 'stale-remote':
             case 'not-applied':

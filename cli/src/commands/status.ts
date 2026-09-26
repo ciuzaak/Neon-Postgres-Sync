@@ -47,10 +47,12 @@ export async function statusCommand(
     host: Host,
     names: string[],
     opts: { json: boolean; allowPrefix: boolean },
-    ui: Ui
+    ui: Ui,
+    report?: { actionable: number }
 ): Promise<ExitCode> {
     const profiles = host.select(names, opts.allowPrefix);
     const rows = await planRows(host, profiles);
+    if (report) report.actionable = rows.filter((r) => r.cls.kind === 'auto' || r.cls.kind === 'decide').length;
 
     if (opts.json) {
         ctx.stdout.write(JSON.stringify({

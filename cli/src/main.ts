@@ -117,9 +117,10 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
 
         switch (command) {
             case 'status': {
-                const code = await statusCommand(ctx, host, args, { json, allowPrefix: interactive }, ui);
-                // Bare `neon-sync` in a terminal: offer to go straight on.
-                if (positionals.length === 0 && interactive && code === EXIT.pending) {
+                const found = { actionable: 0 };
+                const code = await statusCommand(ctx, host, args, { json, allowPrefix: interactive }, ui, found);
+                // Bare `neon-sync` in a terminal: offer to go straight on (also when some rows are stuck).
+                if (positionals.length === 0 && interactive && found.actionable > 0) {
                     if (await ctx.prompts.confirm('Review and apply now?')) {
                         return await applyCommand(ctx, host, 'sync', [], {
                             yes: false, force: false, dryRun: false, json: false, all: false, interactive: true, allowPrefix: true

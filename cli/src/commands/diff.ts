@@ -3,6 +3,7 @@ import type { SyncDirection } from '../../../src/core/types';
 import { CliContext, EXIT, ExitCode, UsageError } from '../context';
 import { Host } from '../host';
 import { renderDiff } from '../ui/diff';
+import { sourceMissing } from '../policy';
 import { planRows, type Row, type Ui } from './status';
 
 export function parseDirection(value: string | undefined): SyncDirection | undefined {
@@ -45,6 +46,11 @@ export async function diffCommand(
     }
 
     const direction = forced ?? row.cls.direction ?? row.plan!.suggestion.direction;
+    const refused = sourceMissing(row.plan!, direction);
+    if (refused) {
+        ctx.stdout.write(`${style.red(sym.error)} ${row.profile.name}: ${direction === 'upload' ? 'an upload' : 'a download'} would be refused — ${refused} (deletions aren't synced).\n`);
+        return EXIT.stuck;
+    }
     const arrow = direction === 'upload' ? `${sym.upload} upload (Remote ${sym.arrowLeft} Local)` : `${sym.download} download (Local ${sym.arrowLeft} Remote)`;
     const notes = [
         row.cls.label,

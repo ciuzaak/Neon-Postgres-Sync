@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import { CONFIG_FILENAME, ConfigFileReadError, ConfigFileStore } from '../../src/core/configFile';
 import { assertValidTableName } from '../../src/core/db';
@@ -107,8 +108,24 @@ export class Host {
         }
         for (const p of profiles) {
             if (out.has(p.name)) continue;
-            const wsl = wslBoundaryError(realPathOrParent(this.resolve(p.filePath)!), this.ctx.pathEnv);
-            if (wsl) out.set(p.name, { label: 'across WSL', detail: wsl });
+            const resolved = this.resolve(p.filePath)!;
+            const wsl = wslBoundaryError(realPathOrParent(resolved), this.ctx.pathEnv);
+            if (wsl) {
+                out.set(p.name, { label: 'across WSL', detail: wsl });
+                continue;
+            }
+            // Something at the path that can't be read as a file fails only its own row.
+            try {
+                const stat = fs.statSync(resolved);
+                if (!stat.isFile()) {
+                    out.set(p.name, { label: 'not a file', detail: `${this.display(resolved)} is ${stat.isDirectory() ? 'a directory' : 'not a regular file'}` });
+                } else {
+                    fs.accessSync(resolved, fs.constants.R_OK);
+                }
+            } catch (e) {
+                const code = (e as NodeJS.ErrnoException).code;
+                if (code !== 'ENOENT') out.set(p.name, { label: 'unreadable', detail: `${this.display(resolved)}: ${code ?? String(e)}` });
+            }
         }
         return out;
     }

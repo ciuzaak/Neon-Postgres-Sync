@@ -129,7 +129,7 @@ test('pull/push overwrite a changed side only with --force; a missing source sid
 
     const noForce = await f.run(['pull', 'a', '--yes']);
     assert.equal(noForce.code, 1);
-    assert.match(noForce.stdout, /needs a decision: add --force to overwrite \(overwrites local changes made since the last sync\)/);
+    assert.match(noForce.stdout, /needs a decision: overwrites local changes made since the last sync; confirm it in a terminal, or add --force --yes/);
     assert.equal(f.file('~/a.json'), 'local edit');
 
     const forced = await f.run(['pull', 'a', '--yes', '--force']);
@@ -263,4 +263,129 @@ test('excludeKeys through the CLI: an upload keeps each side\'s own excluded val
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(await f.remote('vs-id'), '{\n    "font": 16,\n    "theme": "light"\n}\n');
     assert.equal(f.file('~/vs.json'), '{\n    "font": 16,\n    "theme": "dark"\n}\n');
+});
+
+// ── review round 1 regressions ────────────────────────────────────────
+
+test('pull/push apply the whole safety rule: large deletions and recreating a deleted side need a decision', async () => {
+    const f = await cliFixture({ profiles: [profile('big'), profile('empty'), profile('gone')] });
+    const full = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    await synced(f, 'big', full);
+    await synced(f, 'empty', full);
+    await synced(f, 'gone', 'kept');
+    await withBaselines(f);
+    await f.setRemote('big-id', 'line 0');   // another machine truncated it
+    await f.setRemote('empty-id', '');
+    await f.pg.db.query("DELETE FROM records WHERE id = 'gone-id'");
+
+    const pull = outcomes((await f.run(['pull', 'big', 'empty', '--yes', '--json'])).stdout);
+    assert.deepEqual([pull.big.kind, pull.empty.kind], ['skipped', 'skipped']);
+    assert.match(pull.big.reason!, /large deletion/);
+    assert.equal(f.file('~/big.json'), full, 'the only full copy survives');
+
+    const push = outcomes((await f.run(['push', 'gone', '--yes', '--json'])).stdout);
+    assert.equal(push.gone.kind, 'skipped');
+    assert.match(push.gone.reason!, /recreates the remote side, which was deleted since the last sync/);
+    assert.equal(await f.remote('gone-id'), undefined);
+
+    const forced = outcomes((await f.run(['pull', 'big', '--yes', '--force', '--json'])).stdout);
+    assert.equal(forced.big.kind, 'applied');
+    assert.equal(f.file('~/big.json'), 'line 0');
+});
+
+test('--force in a terminal still confirms each destructive row (only --force --yes skips that)', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    await synced(f, 'a');
+    await withBaselines(f);
+    f.writeFile('~/a.json', 'local edit');
+    let initial: string[] = ['?'];
+    let asked = '';
+
+    const r = await f.run(['pull', 'a', '--force'], {
+        tty: true,
+        env: { NO_COLOR: '1' },
+        prompts: {
+            multiselect: (async (_m: string, choices: Array<{ value: string }>, init: string[]) => { initial = init; return choices.map((c) => c.value); }) as never,
+            select: (async (m: string) => { asked = m; return 'skip'; }) as never
+        }
+    });
+
+    assert.deepEqual(initial, [], 'not pre-selected');
+    assert.match(asked, /overwrites local changes made since the last sync/);
+    assert.equal(r.code, 1);
+    assert.equal(f.file('~/a.json'), 'local edit');
+});
+
+test('a profile whose path is a directory fails only its own row', async () => {
+    const f = await cliFixture({ profiles: [profile('dir'), profile('ok')] });
+    fs.mkdirSync(path.join(f.home, 'dir.json'));
+    f.writeFile('~/ok.json', 'x');
+
+    const r = await f.run(['sync', '--yes', '--json']);
+
+    assert.equal(r.code, 4);
+    const o = outcomes(r.stdout);
+    assert.match(o.dir.reason!, /not a file — .*is a directory/);
+    assert.equal(o.ok.kind, 'applied');
+    assert.equal(await f.remote('ok-id'), 'x');
+});
+
+test('a failed sync-history write is reported, not silently counted as a clean success', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    f.writeFile('~/a.json', 'x');
+    const stateParent = path.join(f.home, '.local', 'state', 'neon-sync');
+    fs.mkdirSync(stateParent, { recursive: true });
+    fs.writeFileSync(path.join(stateParent, 'sync-state'), 'not a directory');
+
+    const r = await f.run(['sync', '--yes']);
+
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /uploaded \(couldn't record sync history: .*the next sync may ask about this profile\)/);
+});
+
+test('bare `neon-sync` still offers to apply when some rows are stuck', async () => {
+    const f = await cliFixture({ profiles: [profile('rel', { filePath: 'x.md' }), profile('a')] });
+    f.writeFile('~/a.json', 'x');
+    let offered = false;
+    await f.run([], {
+        tty: true,
+        prompts: {
+            confirm: async () => { offered = true; return false; }
+        }
+    });
+    assert.equal(offered, true);
+});
+
+test('diff in a direction that would be refused says so instead of rendering it', async () => {
+    const f = await cliFixture({ profiles: [profile('e')] });
+    await synced(f, 'e', 'SECRET=1');
+    await withBaselines(f);
+    fs.unlinkSync(path.join(f.home, 'e.json'));
+
+    const r = await f.run(['diff', 'e', '--direction', 'upload']);
+
+    assert.equal(r.code, 4);
+    assert.match(r.stdout, /an upload would be refused — there is no local file to upload/);
+    assert.equal(r.stdout.includes('SECRET'), false);
+});
+
+test('interactive "Show diff" shows every offered direction', async () => {
+    const f = await cliFixture({ profiles: [profile('both')] });
+    await synced(f, 'both');
+    await withBaselines(f);
+    f.writeFile('~/both.json', 'mine');
+    await f.setRemote('both-id', 'theirs');
+    const answers = ['diff', 'skip'];
+
+    const r = await f.run(['sync'], {
+        tty: true,
+        env: { NO_COLOR: '1' },
+        prompts: {
+            multiselect: (async (_m: string, choices: Array<{ value: string }>) => choices.map((c) => c.value)) as never,
+            select: (async () => answers.shift()) as never
+        }
+    });
+
+    assert.match(r.stdout, /If you upload:[\s\S]*-theirs[\s\S]*\+mine/);
+    assert.match(r.stdout, /If you download:[\s\S]*-mine[\s\S]*\+theirs/);
 });

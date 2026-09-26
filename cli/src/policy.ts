@@ -78,9 +78,38 @@ export function classify(plan: SyncPlan): RowClass {
 }
 
 /**
+ * Why forcing `direction` (pull/push) needs an explicit per-row decision, or
+ * undefined if it's safe to apply unattended. The safety rule applies to
+ * forced directions too: overwriting a side that changed since the last sync
+ * (or whose status is unknown), a large deletion in that direction, and
+ * recreating a side deleted since the last sync all need a decision.
+ * (A missing *source* side is refused separately, never applied.)
+ */
+export function forcedNeedsDecision(plan: SyncPlan, direction: SyncDirection): string | undefined {
+    if (plan.status === 'identical') return undefined;
+    const destinationExists = direction === 'upload' ? plan.remoteExists : plan.localExists;
+    const destination = direction === 'upload' ? 'remote' : 'local';
+    if (!destinationExists) {
+        return plan.baselineExists
+            ? `recreates the ${destination} side, which was deleted since the last sync`
+            : undefined;
+    }
+    if (overwritesUnreviewed(plan, direction)) {
+        return plan.change === 'unknown'
+            ? `may overwrite unreviewed ${destination} changes (no sync history)`
+            : `overwrites ${destination} changes made since the last sync`;
+    }
+    const target = direction === 'upload' ? plan.remoteContent : plan.localContent;
+    if (isLargeDeletion(candidateFor(plan, direction), target)) {
+        const { removed } = computeDiffStats(plan.localContent, plan.remoteContent, direction);
+        return `large deletion: removes ${removed} of the ${destination} lines`;
+    }
+    return undefined;
+}
+
+/**
  * Whether forcing `direction` would overwrite a side that changed since the
- * last sync, or whose change status is unknown — a destructive override that
- * needs a per-row confirmation (or `--force` non-interactively).
+ * last sync, or whose change status is unknown.
  */
 export function overwritesUnreviewed(plan: SyncPlan, direction: SyncDirection): boolean {
     if (plan.status === 'identical') return false;
@@ -89,4 +118,15 @@ export function overwritesUnreviewed(plan: SyncPlan, direction: SyncDirection): 
     if (plan.change === 'both' || plan.change === 'unknown') return true;
     const destinationChanged = direction === 'upload' ? plan.change === 'remote' : plan.change === 'local';
     return destinationChanged;
+}
+
+/**
+ * The side a direction reads from must exist, or the destination would be
+ * overwritten with nothing. Deletions aren't synced: a decision whose source
+ * is missing is always refused.
+ */
+export function sourceMissing(plan: SyncPlan, direction: SyncDirection): string | undefined {
+    if (direction === 'upload' && !plan.localExists) return 'there is no local file to upload';
+    if (direction === 'download' && !plan.remoteExists) return 'there is no remote record to download';
+    return undefined;
 }
