@@ -39,7 +39,7 @@ export function hashProjection(projection: string): string {
  * Order-insensitive: the same set of paths always yields the same fingerprint.
  *
  * Paths with a dot also match flat keys such as `"editor.fontSize"` (added
- * after 0.8.0, see jsoncFilter concretePaths), so the same paths can now strip more
+ * in 0.9.0 / CLI 0.2.0, see jsoncFilter concretePaths), so the same paths can now strip more
  * than when an older baseline was taken: those sets hash with a version
  * marker; a baseline without it applies only while neither side has a flat
  * form (plan.ts), else the next sync is handled as "excludeKeys changed"
