@@ -11,7 +11,7 @@ test('config path prints the shared config file and the machine-local state dir'
     const r = await f.run(['config', 'path']);
     assert.equal(r.code, 0);
     assert.ok(r.stdout.includes(`config  ${f.configPath}\n`), r.stdout);
-    assert.match(r.stdout, /state {3}.*\.local[\\/]state[\\/]neon-sync[\\/]sync-state/);
+    assert.ok(r.stdout.includes(`state   ${f.stateDir}\n`), r.stdout);
 });
 
 test('config set-url refuses the URL as an argument (shell history)', async () => {

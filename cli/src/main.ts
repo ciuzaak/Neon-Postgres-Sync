@@ -107,7 +107,7 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         }
 
         const [command = 'status', ...args] = positionals;
-        const accepted = COMMAND_FLAGS[command];
+        const accepted = Object.prototype.hasOwnProperty.call(COMMAND_FLAGS, command) ? COMMAND_FLAGS[command] : undefined;
         if (!accepted) {
             throw new UsageError(
                 `Unknown command "${command}". Profile names go after a command, e.g. \`neon-sync status ${command}\`. See \`neon-sync --help\`.`

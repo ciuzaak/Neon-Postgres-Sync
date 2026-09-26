@@ -17,7 +17,10 @@ export interface RunResult {
 
 export interface CliFixture {
     home: string;
+    /** Where the CLI reads profiles on this platform (the harness passes no APPDATA/LOCALAPPDATA). */
     configPath: string;
+    /** The machine-local sync-state directory on this platform. */
+    stateDir: string;
     pg: Awaited<ReturnType<typeof createPgliteSql>>;
     keychain: Keychain & { value?: string };
     run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter>; columns?: number;
@@ -47,7 +50,9 @@ export async function cliFixture(opts: {
     const { RecordStore } = require('../../src/core/db') as typeof import('../../src/core/db');
 
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-cli-home-'));
-    const configPath = path.join(home, '.config', 'neon-sync', 'neon-sync.json');
+    const { configDir, stateDir } = require('../../src/core/paths') as typeof import('../../src/core/paths');
+    const pathEnv = { platform: process.platform, home, env: {} };
+    const configPath = path.join(configDir(pathEnv), 'neon-sync.json');
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     if (opts.configRaw !== undefined) fs.writeFileSync(configPath, opts.configRaw);
     else if (opts.profiles) fs.writeFileSync(configPath, JSON.stringify({ profiles: opts.profiles }, null, 2));
@@ -59,6 +64,7 @@ export async function cliFixture(opts: {
     return {
         home,
         configPath,
+        stateDir: path.join(stateDir(pathEnv), 'sync-state'),
         pg,
         keychain,
         async run(argv, runOpts = {}) {

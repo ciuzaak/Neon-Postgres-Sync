@@ -16,9 +16,8 @@ const INSTANT_MS = 1000;
 
 /**
  * Temp dirs holding config contents, removed on every way out: normal
- * return (finally), process exit, and SIGTERM/SIGHUP (which would otherwise
- * kill us before `finally` runs). SIGINT/SIGQUIT are ignored while the editor
- * runs (see context.runEditor).
+ * return (finally), process exit, SIGTERM/SIGHUP, and SIGINT outside the
+ * editor (see editCommand; while the editor runs, Ctrl-C is the editor's).
  */
 const liveTempDirs = new Set<string>();
 let hooksInstalled = false;
@@ -123,6 +122,16 @@ export async function editCommand(
     // Private temp dir; keep the profile's extension for syntax highlighting.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-edit-'));
     trackTempDir(dir);
+    // Ctrl-C outside the editor (e.g. during a slow apply) must not leave the
+    // temp file behind: clean up, then exit like an interrupted process.
+    let inEditor = false;
+    const onInterrupt = () => {
+        if (inEditor) return;
+        fs.rmSync(dir, { recursive: true, force: true });
+        liveTempDirs.delete(dir);
+        process.exit(130);
+    };
+    process.on('SIGINT', onInterrupt);
     try {
         fs.chmodSync(dir, 0o700);
         const ext = safeExtension(row.profile.filePath);
@@ -150,12 +159,15 @@ export async function editCommand(
         const started = ctx.now();
         let status: number;
         try {
+            inEditor = true;
             status = await ctx.runEditor(command, args);
         } catch (e) {
             if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
                 throw new UsageError(`Couldn't start the editor "${command}". Set $VISUAL or $EDITOR (e.g. "code --wait", "nano", "vim").`);
             }
             throw e;
+        } finally {
+            inEditor = false;
         }
         if (status !== 0) {
             ctx.stdout.write(`The editor exited with status ${status}; nothing was written.\n`);
@@ -183,7 +195,9 @@ export async function editCommand(
         const diff = renderDiff(destinationNow, edited, `${destLabel} (now)`, `${destLabel} (after ${direction})`, style);
         ctx.stdout.write('\n' + (diff || style.dim('(the destination already holds exactly this)\n')) + '\n');
         const destination = direction === 'upload' ? 'remote' : 'local';
+        const destinationExists = direction === 'upload' ? plan.remoteExists : plan.localExists;
         const warnings = [
+            !destinationExists && plan.baselineExists && `This recreates the ${destination} side, which was deleted since the last sync.`,
             overwritesUnreviewed(plan, direction) && (plan.change === 'unknown'
                 ? `This may overwrite ${destination} changes (no sync history).`
                 : `This overwrites ${destination} changes made since the last sync.`),
@@ -207,6 +221,7 @@ export async function editCommand(
         ctx.stdout.write(`  ${d.mark}  ${name}  ${d.text}\n`);
         return d.code;
     } finally {
+        process.off('SIGINT', onInterrupt);
         fs.rmSync(dir, { recursive: true, force: true });
         liveTempDirs.delete(dir);
     }

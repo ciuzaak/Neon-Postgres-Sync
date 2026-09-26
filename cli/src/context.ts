@@ -103,16 +103,24 @@ export function defaultContext(): CliContext {
             // Like git: while the editor owns the terminal, Ctrl-C and Ctrl-\ are
             // the editor's business. (If they killed us, our cleanup — which
             // removes a temp file holding the config's contents — wouldn't run.)
+            // Windows editors are often .cmd shims (code.cmd), which need
+            // cmd.exe; Node then joins argv with spaces, so quote each part.
+            // (Quoting may refuse an argument: do it before touching handlers.)
+            const win = process.platform === 'win32';
+            const line = win ? [command, ...args].map(quoteForCmd).join(' ') : undefined;
             const ignore = () => { /* the editor handles it */ };
             process.on('SIGINT', ignore);
             process.on('SIGQUIT', ignore);
             const done = () => { process.off('SIGINT', ignore); process.off('SIGQUIT', ignore); };
-            // Windows editors are often .cmd shims (code.cmd), which need
-            // cmd.exe; Node then joins argv with spaces, so quote each part.
-            const win = process.platform === 'win32';
-            const child = win
-                ? spawn([command, ...args].map(quoteForCmd).join(' '), { stdio: 'inherit', shell: true })
-                : spawn(command, args, { stdio: 'inherit' });
+            let child;
+            try {
+                child = line !== undefined
+                    ? spawn(line, { stdio: 'inherit', shell: true })
+                    : spawn(command, args, { stdio: 'inherit' });
+            } catch (e) {
+                done();
+                throw e;
+            }
             child.on('error', (e) => { done(); reject(e); });
             child.on('exit', (code) => { done(); resolve(code ?? 1); });
         }),

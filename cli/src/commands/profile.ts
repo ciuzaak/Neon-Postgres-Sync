@@ -36,7 +36,7 @@ export async function profileCommand(
         list: ['json'], show: ['json'], add: ['json', 'file', 'id', 'table', 'exclude'], remove: ['json', 'yes'], rename: ['json']
     };
     for (const flag of opts.given) {
-        if (sub in allowed && !allowed[sub].includes(flag)) throw new UsageError(`\`profile ${sub}\` doesn't take --${flag}.`);
+        if (Object.prototype.hasOwnProperty.call(allowed, sub) && !allowed[sub].includes(flag)) throw new UsageError(`\`profile ${sub}\` doesn't take --${flag}.`);
     }
     const done = (human: string, json: Record<string, unknown>) => {
         ctx.stdout.write(opts.json ? JSON.stringify(json, null, 2) + '\n' : human);

@@ -253,7 +253,9 @@ test('human output: header, rows, summary; no color codes when not a TTY', async
 
     const r = await f.run([]);
 
-    assert.match(r.stdout, /neon-sync · 2 profiles · db\.example\.test\/neondb · ~\/\.config\/neon-sync\/neon-sync\.json/);
+    const { abbreviateHome } = require('../../src/core/paths') as typeof import('../../src/core/paths');
+    const shownConfig = abbreviateHome(f.configPath, { platform: process.platform, home: f.home });
+    assert.ok(r.stdout.includes(`neon-sync · 2 profiles · db.example.test/neondb · ${shownConfig}`), r.stdout);
     assert.match(r.stdout, /↑ {2}a {2}~\/a\.json +local only +\+1 −0/);
     assert.match(r.stdout, /✓ {2}b {2}~\/b\.json +in sync/);
     assert.match(r.stdout, /1 ready to apply/);

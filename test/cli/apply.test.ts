@@ -334,9 +334,8 @@ test('a profile whose path is a directory fails only its own row', async () => {
 test('a failed sync-history write is reported, not silently counted as a clean success', async () => {
     const f = await cliFixture({ profiles: [profile('a')] });
     f.writeFile('~/a.json', 'x');
-    const stateParent = path.join(f.home, '.local', 'state', 'neon-sync');
-    fs.mkdirSync(stateParent, { recursive: true });
-    fs.writeFileSync(path.join(stateParent, 'sync-state'), 'not a directory');
+    fs.mkdirSync(path.dirname(f.stateDir), { recursive: true });
+    fs.writeFileSync(f.stateDir, 'not a directory');
 
     const r = await f.run(['sync', '--yes']);
 

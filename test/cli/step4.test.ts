@@ -437,3 +437,83 @@ test('init-db refuses an existing relation it could not sync with', async () => 
     }
     assert.match((await f.run(['init-db', '--table', 'okjson'])).stdout, /already exists/);
 });
+
+// ── review round 2 regressions ────────────────────────────────────────
+
+test('Ctrl-C after the editor returned (e.g. during a slow apply) still removes the temp file, then exits 130', async () => {
+    const f = await cliFixture({ profiles: [profile('env')] });
+    f.writeFile('~/env.json', 'SECRET=hunter2');
+    let dir = '';
+    let exitCode: number | undefined;
+    const realExit = process.exit;
+    (process as unknown as { exit: (c?: number) => never }).exit = ((c?: number) => { exitCode = c; throw new Error('exited'); }) as never;
+    try {
+        await f.run(['edit', 'env'], {
+            ...TTY,
+            editor: async (_c, args) => { dir = path.dirname(args[args.length - 1]); fs.writeFileSync(args[args.length - 1], 'SECRET=new'); return 0; },
+            now: clockTaking(5000),
+            prompts: { confirm: async () => { process.emit('SIGINT' as never); return true; } }
+        }).catch(() => undefined);
+    } finally {
+        process.exit = realExit;
+    }
+    assert.equal(exitCode, 130);
+    assert.equal(fs.existsSync(dir), false);
+});
+
+test('a refused Windows argument leaves no signal handlers behind', async () => {
+    const { defaultContext } = require('../../cli/src/context') as typeof import('../../cli/src/context');
+    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGQUIT')];
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+        await assert.rejects(defaultContext().runEditor('ed', ['%TEMP%\\x']), /safely/);
+    } finally {
+        Object.defineProperty(process, 'platform', platform);
+    }
+    assert.deepEqual([process.listenerCount('SIGINT'), process.listenerCount('SIGQUIT')], before);
+});
+
+test('edit warns before recreating a side deleted since the last sync', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    await synced(f, 'a', 'x');
+    await f.run(['status']);
+    await f.pg.db.query("DELETE FROM records WHERE id = 'a-id'");
+    const r = await f.run(['edit', 'a', '--direction', 'upload'], {
+        ...TTY, editor: editorWriting('y'), now: clockTaking(5000), prompts: { confirm: async () => false }
+    });
+    assert.match(r.stdout, /This recreates the remote side, which was deleted since the last sync\./);
+});
+
+test('command and subcommand names that exist on Object.prototype are plain usage errors', async () => {
+    const f = await cliFixture({ profiles: [] });
+    for (const argv of [['profile', 'constructor', '--json'], ['profile', '__proto__', '--yes'], ['constructor', '--json'], ['toString']]) {
+        const r = await f.run(argv);
+        assert.equal(r.code, 2, argv.join(' '));
+    }
+});
+
+test('concurrent `profile add` from separate processes: every profile lands (config lock)', async () => {
+    const f = await cliFixture({ profiles: [] });
+    const main = path.resolve(__dirname, '..', '..', 'cli', 'src', 'main.js');
+    const context = path.resolve(__dirname, '..', '..', 'cli', 'src', 'context.js');
+    const start = Date.now() + 500;
+    const script = `
+        const { main } = require(${JSON.stringify(main)});
+        const { defaultContext } = require(${JSON.stringify(context)});
+        while (Date.now() < ${start}) {}
+        const n = process.argv[1];
+        main(['profile', 'add', 'p' + n, '--file', '~/f' + n + '.json', '--id', 'id' + n], defaultContext()).then((c) => process.exit(c));`;
+    const { spawn } = require('node:child_process') as typeof import('node:child_process');
+    const codes = await Promise.all(Array.from({ length: 6 }, (_, i) => new Promise<number>((resolve) => {
+        // The same locations the harness uses: home-based, no APPDATA/LOCALAPPDATA override.
+        const env: NodeJS.ProcessEnv = { ...process.env, HOME: f.home, USERPROFILE: f.home };
+        delete env.APPDATA;
+        delete env.LOCALAPPDATA;
+        spawn(process.execPath, ['-e', script, String(i)], { env, stdio: 'ignore' })
+            .on('exit', (c) => resolve(c ?? 1));
+    })));
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0]);
+    const names = JSON.parse(fs.readFileSync(f.configPath, 'utf-8')).profiles.map((p: { name: string }) => p.name).sort();
+    assert.deepEqual(names, ['p0', 'p1', 'p2', 'p3', 'p4', 'p5']);
+});
