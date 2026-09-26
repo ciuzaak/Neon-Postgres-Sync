@@ -160,6 +160,7 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
                 return await diffCommand(ctx, host, args, { direction: values.direction, allowPrefix: interactive }, ui);
             case 'profile':
                 return await profileCommand(ctx, host, args, {
+                    given: Object.keys(values).filter((f) => !GLOBAL_FLAGS.includes(f)),
                     json,
                     yes: !!values.yes,
                     file: values.file,

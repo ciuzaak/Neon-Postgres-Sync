@@ -100,13 +100,34 @@ export function defaultContext(): CliContext {
         runEditor: (command, args) => new Promise((resolve, reject) => {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { spawn } = require('child_process') as typeof import('child_process');
-            // Windows editors are often .cmd shims (code.cmd), which need a shell.
-            const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
-            child.on('error', reject);
-            child.on('exit', (code) => resolve(code ?? 1));
+            // Like git: while the editor owns the terminal, Ctrl-C and Ctrl-\ are
+            // the editor's business. (If they killed us, our cleanup — which
+            // removes a temp file holding the config's contents — wouldn't run.)
+            const ignore = () => { /* the editor handles it */ };
+            process.on('SIGINT', ignore);
+            process.on('SIGQUIT', ignore);
+            const done = () => { process.off('SIGINT', ignore); process.off('SIGQUIT', ignore); };
+            // Windows editors are often .cmd shims (code.cmd), which need
+            // cmd.exe; Node then joins argv with spaces, so quote each part.
+            const win = process.platform === 'win32';
+            const child = win
+                ? spawn([command, ...args].map(quoteForCmd).join(' '), { stdio: 'inherit', shell: true })
+                : spawn(command, args, { stdio: 'inherit' });
+            child.on('error', (e) => { done(); reject(e); });
+            child.on('exit', (code) => { done(); resolve(code ?? 1); });
         }),
         now: () => Date.now()
     };
+}
+
+/**
+ * Quote one argument for cmd.exe: always double-quoted, inner quotes
+ * doubled. Characters cmd still interprets inside quotes (% and !) are
+ * refused rather than guessed at — temp paths and editor paths don't use them.
+ */
+export function quoteForCmd(arg: string): string {
+    if (/[%!\r\n]/.test(arg)) throw new UsageError(`Can't pass "${arg}" safely to the editor on Windows.`);
+    return `"${arg.replace(/"/g, '""')}"`;
 }
 
 /** $PAGER (default `less -R`; none on Windows unless $PAGER is set). */

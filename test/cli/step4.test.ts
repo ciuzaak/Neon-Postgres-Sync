@@ -169,7 +169,6 @@ test('edit --tool code opens a diff of the destination and the (0600) candidate'
 
     assert.equal(r.code, 0);
     assert.deepEqual([seen.command, seen.args![0], seen.args![1]], ['code', '--wait', '--diff']);
-    assert.equal(fs.readFileSync.length > 0, true);
     if (process.platform !== 'win32') assert.deepEqual(modes, [0o600, 0o600]);
     assert.equal(await f.remote('a-id'), 'new!');
 });
@@ -294,4 +293,147 @@ test('init-db creates the table once; invalid names are refused', async () => {
     assert.match((await f.run(['init-db'])).stdout, /already exists in db\.example\.test\/neondb; nothing changed/);
     assert.match((await f.run(['init-db', '--table', 'records'])).stdout, /already exists/);
     assert.equal((await f.run(['init-db', '--table', 'x; drop table y'])).code, 2);
+});
+
+// ── review round 1 regressions ────────────────────────────────────────
+
+test('while the editor runs, Ctrl-C belongs to the editor: neon-sync survives it and cleans up afterwards', { skip: process.platform === 'win32' }, async () => {
+    const { defaultContext } = require('../../cli/src/context') as typeof import('../../cli/src/context');
+    const before = process.listenerCount('SIGINT');
+    const code = await defaultContext().runEditor(process.execPath, ['-e', `process.kill(${process.pid}, 'SIGINT'); setTimeout(() => {}, 300)`]);
+    assert.equal(code, 0, 'we are still alive to see the editor exit');
+    assert.equal(process.listenerCount('SIGINT'), before, 'the handler is removed afterwards');
+});
+
+test('temp files are removed when the editor fails to start or throws', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    f.writeFile('~/a.json', 'SECRET=1');
+    let seenDir = '';
+    const r = await f.run(['edit', 'a'], {
+        ...TTY,
+        editor: async (_c, args) => {
+            seenDir = path.dirname(args[args.length - 1]);
+            throw Object.assign(new Error('spawn fake-editor ENOENT'), { code: 'ENOENT' });
+        }
+    });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /Couldn't start the editor "fake-editor"\. Set \$VISUAL or \$EDITOR/);
+    assert.equal(fs.existsSync(seenDir), false);
+});
+
+test('Windows editor arguments are quoted for cmd.exe; unsafe extensions become .txt', async () => {
+    const { quoteForCmd } = require('../../cli/src/context') as typeof import('../../cli/src/context');
+    assert.equal(quoteForCmd('C:\\Users\\John Smith\\x.json'), '"C:\\Users\\John Smith\\x.json"');
+    assert.equal(quoteForCmd('a"b'), '"a""b"');
+    assert.throws(() => quoteForCmd('%PATH%'), /safely/);
+
+    const f = await cliFixture({ profiles: [profile('odd', { filePath: '~/x.json&calc' })] });
+    f.writeFile('~/x.json&calc', 'x');
+    let file = '';
+    await f.run(['edit', 'odd'], { ...TTY, editor: async (_c, args) => { file = args[args.length - 1]; return 0; }, now: clockTaking(10) });
+    assert.match(path.basename(file), /\.txt$/);
+});
+
+test('edit states when it overrides the safety rule, and applies only what was shown', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    const full = Array.from({ length: 20 }, (_, i) => `l${i}`).join('\n');
+    await synced(f, 'a', full);
+    await f.run(['status']);
+    await f.setRemote('a-id', `${full}\nremote edit`);
+    let candidate = '';
+
+    const r = await f.run(['edit', 'a', '--direction', 'upload'], {
+        ...TTY,
+        editor: async (_c, args) => { candidate = args[args.length - 1]; fs.writeFileSync(candidate, 'l0'); return 0; },
+        now: clockTaking(5000),
+        prompts: { confirm: async () => { fs.writeFileSync(candidate, 'saved later'); return true; } }
+    });
+
+    assert.match(r.stdout, /This overwrites remote changes made since the last sync\./);
+    assert.match(r.stdout, /This removes most of the remote content\./);
+    assert.match(r.stdout, /The file changed after the editor returned; nothing was written/);
+    assert.equal(r.code, 1);
+    assert.equal(await f.remote('a-id'), `${full}\nremote edit`);
+});
+
+test('edit --tool code: edits to the left-hand side are called out and ignored', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    f.writeFile('~/a.json', 'new');
+    const r = await f.run(['edit', 'a', '--tool', 'code'], {
+        ...TTY,
+        editor: async (_c, args) => { fs.writeFileSync(args[2], 'edited left'); fs.writeFileSync(args[3], 'right'); return 0; },
+        now: clockTaking(5000),
+        prompts: { confirm: async () => true }
+    });
+    assert.match(r.stdout, /Edits to the left-hand \(current remote\) side are ignored/);
+    assert.equal(await f.remote('a-id'), 'right');
+});
+
+test('the "excluded keys hidden" note appears only when the profile excludes keys', async () => {
+    const f = await cliFixture({ profiles: [profile('plain'), profile('vs', { excludeKeys: ['theme'] })] });
+    f.writeFile('~/plain.json', 'x');
+    f.writeFile('~/vs.json', '{"a": 1, "theme": "dark"}');
+    const run = (n: string) => f.run(['edit', n], { ...TTY, editor: async () => 0, now: clockTaking(10) });
+    assert.equal((await run('plain')).stdout.includes('excluded keys hidden'), false);
+    assert.match((await run('vs')).stdout, /excluded keys hidden/);
+});
+
+test('profile add refuses a record another profile syncs, directories and blank paths, and unusable --exclude keys', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    fs.mkdirSync(path.join(f.home, 'somedir'));
+    const cases: Array<[string[], RegExp]> = [
+        [['profile', 'add', 'b', '--file', '~/b.json', '--id', 'a-id', '--table', 'public.RECORDS'], /Profile "a" already syncs record public\.RECORDS\/a-id/],
+        [['profile', 'add', 'b', '--file', '~/somedir', '--id', 'x'], /is a directory/],
+        [['profile', 'add', 'b', '--file', '.', '--id', 'x'], /is a directory/],
+        [['profile', 'add', 'b', '--file', '  ', '--id', 'x'], /needs --file/],
+        [['profile', 'add', 'b', '--file', '~/b.json', '--id', 'x', '--exclude', 'a..b', '--exclude', '*'], /Unsupported --exclude "a\.\.b", "\*"/]
+    ];
+    for (const [argv, message] of cases) {
+        const r = await f.run(argv);
+        assert.equal(r.code, 2, argv.join(' '));
+        assert.match(r.stderr, message, argv.join(' '));
+    }
+});
+
+test('profile add sees a shared file through a symlink and (on macOS) a case difference', { skip: process.platform === 'win32' }, async () => {
+    const f = await cliFixture({ profiles: [profile('a', { filePath: '~/Real.json' })] });
+    f.writeFile('~/Real.json', 'x');
+    fs.symlinkSync(path.join(f.home, 'Real.json'), path.join(f.home, 'link.json'));
+    const viaLink = await f.run(['profile', 'add', 'b', '--file', '~/link.json', '--id', 'b']);
+    assert.match(viaLink.stderr, /Profile "a" already uses/);
+    if (process.platform === 'darwin') {
+        const viaCase = await f.run(['profile', 'add', 'c', '--file', '~/real.json', '--id', 'c']);
+        assert.match(viaCase.stderr, /Profile "a" already uses/);
+    }
+});
+
+test('profile subcommands: --json output, and flags a subcommand does not use are refused', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    const added = await f.run(['profile', 'add', 'b', '--file', '~/b.json', '--id', 'b', '--json']);
+    assert.equal(JSON.parse(added.stdout).added.name, 'b');
+    assert.deepEqual(JSON.parse((await f.run(['profile', 'rename', 'b', 'c', '--json'])).stdout), { renamed: { from: 'b', to: 'c' } });
+    assert.deepEqual(JSON.parse((await f.run(['profile', 'remove', 'c', '--yes', '--json'])).stdout), { removed: 'c' });
+    const r = await f.run(['profile', 'list', '--file', 'zzz']);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /`profile list` doesn't take --file/);
+});
+
+test('init-db refuses an existing relation it could not sync with', async () => {
+    const f = await cliFixture();
+    await f.pg.db.exec(`
+        CREATE VIEW v AS SELECT 1 AS id;
+        CREATE TABLE partial (id TEXT, payload JSONB);
+        CREATE TABLE badtype (id TEXT, data INT, create_time TIMESTAMP, update_time TIMESTAMP);
+        CREATE TABLE okjson (id TEXT PRIMARY KEY, data JSONB, create_time TIMESTAMP, update_time TIMESTAMP);`);
+    const cases: Array<[string, RegExp]> = [
+        ['v', /it is a view/],
+        ['partial', /it has no data, create_time, update_time columns/],
+        ['badtype', /its data column is integer, not text/]
+    ];
+    for (const [table, message] of cases) {
+        const r = await f.run(['init-db', '--table', table]);
+        assert.equal(r.code, 2, table);
+        assert.match(r.stderr, message, table);
+    }
+    assert.match((await f.run(['init-db', '--table', 'okjson'])).stdout, /already exists/);
 });

@@ -1,4 +1,6 @@
+import * as fs from 'fs';
 import * as path from 'path';
+import { parsePaths } from '../../../src/core/jsoncFilter';
 import { normalizeProfileForWrite } from '../../../src/core/configFile';
 import { samePathKey } from '../../../src/core/localFile';
 import { abbreviateHome, expandHome } from '../../../src/core/paths';
@@ -11,6 +13,8 @@ import { DEFAULT_TABLE } from './initDb';
 import type { Ui } from './status';
 
 export interface ProfileFlags {
+    /** Flags actually given, to reject ones this subcommand doesn't use. */
+    given: string[];
     json: boolean;
     yes: boolean;
     file?: string;
@@ -28,6 +32,16 @@ export async function profileCommand(
 ): Promise<ExitCode> {
     const interactive = ctx.stdinIsTTY && ctx.stdout.isTTY && !opts.json;
     const [sub, ...rest] = args;
+    const allowed: Record<string, string[]> = {
+        list: ['json'], show: ['json'], add: ['json', 'file', 'id', 'table', 'exclude'], remove: ['json', 'yes'], rename: ['json']
+    };
+    for (const flag of opts.given) {
+        if (sub in allowed && !allowed[sub].includes(flag)) throw new UsageError(`\`profile ${sub}\` doesn't take --${flag}.`);
+    }
+    const done = (human: string, json: Record<string, unknown>) => {
+        ctx.stdout.write(opts.json ? JSON.stringify(json, null, 2) + '\n' : human);
+        return EXIT.ok;
+    };
     switch (sub) {
         case 'list': {
             if (rest.length > 0) throw new UsageError('Usage: neon-sync profile list');
@@ -82,8 +96,7 @@ export async function profileCommand(
                 return found ? { ...config, profiles: config.profiles.filter((p) => p.name !== target.name) } : undefined;
             });
             if (!found) throw new UsageError(`Profile "${target.name}" was already removed.`);
-            ctx.stdout.write(`Removed profile ${target.name}. Its file and remote record were not touched.\n`);
-            return EXIT.ok;
+            return done(`Removed profile ${target.name}. Its file and remote record were not touched.\n`, { removed: target.name });
         }
         case 'rename': {
             if (rest.length !== 2) throw new UsageError('Usage: neon-sync profile rename <old> <new>');
@@ -101,8 +114,7 @@ export async function profileCommand(
                 return { ...config, profiles: config.profiles.map((p) => (p.name === from ? { ...p, name: to } : p)) };
             });
             if (problem) throw new UsageError(problem);
-            ctx.stdout.write(`Renamed ${from} to ${to}. (Sync history isn't tied to names, so nothing else changes.)\n`);
-            return EXIT.ok;
+            return done(`Renamed ${from} to ${to}. (Sync history isn't tied to names, so nothing else changes.)\n`, { renamed: { from, to } });
         }
         default:
             throw new UsageError('Usage: neon-sync profile list | show <name> | add | remove <name> | rename <old> <new>');
@@ -138,19 +150,29 @@ async function addProfile(
             throw e;
         }
     }
-    const missing = [!name && 'a name', !file && '--file', !id && '--id'].filter(Boolean);
+    const missing = [!name?.trim() && 'a name', !file?.trim() && '--file', !id?.trim() && '--id'].filter(Boolean);
     if (missing.length > 0) throw new UsageError(`profile add needs ${missing.join(', ')}.`);
+    const excludes = (opts.exclude ?? []).map((k) => k.trim()).filter(Boolean);
+    const unusable = excludes.filter((k) => parsePaths([k]).length === 0);
+    if (unusable.length > 0) {
+        throw new UsageError(`Unsupported --exclude ${unusable.map((k) => `"${k}"`).join(', ')}: use dot-separated key names (no wildcards, indexes or empty parts).`);
+    }
 
     // A path typed on the command line is relative to the current directory;
     // store it in the portable ~/… (or absolute) form.
     const expanded = expandHome(file!.trim(), ctx.pathEnv);
     const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(ctx.cwd, expanded);
+    try {
+        if (fs.statSync(absolute).isDirectory()) throw new UsageError(`${abbreviateHome(absolute, ctx.pathEnv)} is a directory; --file must name a file.`);
+    } catch (e) {
+        if (e instanceof UsageError) throw e; // a missing file is fine: it will be downloaded
+    }
     const profile: Profile = normalizeProfileForWrite({
         name: name!.trim(),
         filePath: abbreviateHome(absolute, ctx.pathEnv),
         id: id!.trim(),
         tableName: (table ?? DEFAULT_TABLE).trim(),
-        excludeKeys: (opts.exclude ?? []).map((k) => k.trim()).filter(Boolean)
+        excludeKeys: excludes
     });
 
     let problem: string | undefined;
@@ -170,9 +192,20 @@ async function addProfile(
             problem = `Profile "${clash.name}" already uses ${profile.filePath}; each profile needs its own file.`;
             return undefined;
         }
+        // Same rule as the engine's batch check: two profiles on one record can't sync together.
+        const recordKey = (p: Profile) => `${p.tableName.toLowerCase().split('.').pop()}\u0000${p.id}`;
+        const sameRecord = config.profiles.find((p) => recordKey(p) === recordKey(profile));
+        if (sameRecord) {
+            problem = `Profile "${sameRecord.name}" already syncs record ${profile.tableName}/${profile.id}; each profile needs its own record.`;
+            return undefined;
+        }
         return { ...config, profiles: [...config.profiles, profile] };
     });
     if (problem) throw new UsageError(problem);
+    if (opts.json) {
+        ctx.stdout.write(JSON.stringify({ added: profile }, null, 2) + '\n');
+        return EXIT.ok;
+    }
     ctx.stdout.write(`${ui.style.green(ui.sym.inSync)} Added ${profile.name}: ${profile.filePath} ⇄ ${profile.tableName}/${profile.id}\n`);
     ctx.stdout.write(ui.style.dim(`  Next: \`neon-sync status ${profile.name}\`\n`));
     return EXIT.ok;

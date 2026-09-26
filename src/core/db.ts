@@ -221,19 +221,40 @@ export class RecordStore {
     }
 
     /**
-     * Create the sync table with the documented schema if it doesn't exist.
-     * Returns true if it was created (false: it already existed).
+     * Create the sync table with the documented schema if nothing by that
+     * name exists. If something does, check it's usable: a table (not a view
+     * or index) with the four columns and a text-like `data` column.
      */
-    async createTable(tableName: string): Promise<boolean> {
+    async createTable(tableName: string): Promise<{ created: boolean; problem?: string }> {
         assertValidTableName(tableName);
-        const exists = parseQueryRows(await this.sql.query('SELECT to_regclass($1) IS NOT NULL AS exists', [tableName]));
-        if (exists[0]?.exists === true) return false;
-        await this.sql.query(
-            `CREATE TABLE IF NOT EXISTS ${tableName} (` +
-            `${ID_COLUMN} TEXT PRIMARY KEY, ${DATA_COLUMN} TEXT, ${CREATE_TIME_COLUMN} TIMESTAMP, ${UPDATE_TIME_COLUMN} TIMESTAMP)`,
-            []
-        );
-        return true;
+        const found = parseQueryRows(await this.sql.query(
+            `SELECT c.relkind::text AS kind,
+                    (SELECT json_object_agg(a.attname, format_type(a.atttypid, a.atttypmod))
+                       FROM pg_attribute a
+                      WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) AS columns
+               FROM pg_class c WHERE c.oid = to_regclass($1)`,
+            [tableName]
+        ))[0];
+        if (!found) {
+            await this.sql.query(
+                `CREATE TABLE IF NOT EXISTS ${tableName} (` +
+                `${ID_COLUMN} TEXT PRIMARY KEY, ${DATA_COLUMN} TEXT, ${CREATE_TIME_COLUMN} TIMESTAMP, ${UPDATE_TIME_COLUMN} TIMESTAMP)`,
+                []
+            );
+            return { created: true };
+        }
+        const kinds: Record<string, string> = { v: 'a view', m: 'a materialized view', i: 'an index', S: 'a sequence', f: 'a foreign table', c: 'a composite type' };
+        if (found.kind !== 'r' && found.kind !== 'p') {
+            return { created: false, problem: `it is ${kinds[String(found.kind)] ?? 'not a table'}` };
+        }
+        const raw = found.columns;
+        const columns = (typeof raw === 'string' ? JSON.parse(raw) : raw ?? {}) as Record<string, string>;
+        const missing = [ID_COLUMN, DATA_COLUMN, CREATE_TIME_COLUMN, UPDATE_TIME_COLUMN].filter((c) => !(c in columns));
+        if (missing.length > 0) return { created: false, problem: `it has no ${missing.join(', ')} column${missing.length > 1 ? 's' : ''}` };
+        if (!/^(text|character varying.*|json|jsonb)$/.test(columns[DATA_COLUMN])) {
+            return { created: false, problem: `its data column is ${columns[DATA_COLUMN]}, not text` };
+        }
+        return { created: false };
     }
 
     /** One round trip (`SELECT 1`): checks the URL, credentials and network. */

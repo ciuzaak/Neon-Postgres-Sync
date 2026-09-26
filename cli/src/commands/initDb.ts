@@ -13,7 +13,10 @@ export async function initDbCommand(ctx: CliContext, host: Host, args: string[],
         throw new UsageError(`Invalid table name "${table}": letters, digits and underscores, optionally schema.table.`);
     }
     const { url } = await host.connection();
-    const created = await ctx.createStore(url).createTable(table);
+    const { created, problem } = await ctx.createStore(url).createTable(table);
+    if (problem) {
+        throw new UsageError(`${table} already exists in ${describeUrl(url)} but can't be used for syncing: ${problem}. Pick another --table, or fix it.`);
+    }
     ctx.stdout.write(created
         ? `${ui.style.green(ui.sym.inSync)} Created table ${table} in ${describeUrl(url)}.\n`
         : `Table ${table} already exists in ${describeUrl(url)}; nothing changed.\n`);

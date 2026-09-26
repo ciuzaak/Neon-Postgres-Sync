@@ -6,13 +6,38 @@ import type { SyncDirection } from '../../../src/core/types';
 import { CliContext, EXIT, ExitCode, UsageError } from '../context';
 import { Host } from '../host';
 import { renderDiff } from '../ui/diff';
-import { sourceMissing } from '../policy';
+import { isLargeDeletion, overwritesUnreviewed, sourceMissing } from '../policy';
 import { describeOutcome } from './apply';
 import { parseDirection } from './diff';
 import { planRows, type Ui } from './status';
 
 /** An editor returning faster than this without changes almost certainly didn't wait. */
 const INSTANT_MS = 1000;
+
+/**
+ * Temp dirs holding config contents, removed on every way out: normal
+ * return (finally), process exit, and SIGTERM/SIGHUP (which would otherwise
+ * kill us before `finally` runs). SIGINT/SIGQUIT are ignored while the editor
+ * runs (see context.runEditor).
+ */
+const liveTempDirs = new Set<string>();
+let hooksInstalled = false;
+function trackTempDir(dir: string): void {
+    liveTempDirs.add(dir);
+    if (hooksInstalled) return;
+    hooksInstalled = true;
+    const cleanup = () => { for (const d of liveTempDirs) fs.rmSync(d, { recursive: true, force: true }); liveTempDirs.clear(); };
+    process.on('exit', cleanup);
+    for (const signal of ['SIGTERM', 'SIGHUP'] as const) {
+        process.once(signal, () => { cleanup(); process.kill(process.pid, signal); });
+    }
+}
+
+/** A file extension safe to put in a temp file name (and on a Windows command line). */
+function safeExtension(filePath: string): string {
+    const ext = path.extname(filePath);
+    return /^\.[A-Za-z0-9_-]{1,15}$/.test(ext) ? ext : '.txt';
+}
 
 /**
  * Split an $EDITOR-style command into argv: whitespace separates words;
@@ -97,17 +122,19 @@ export async function editCommand(
 
     // Private temp dir; keep the profile's extension for syntax highlighting.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-edit-'));
+    trackTempDir(dir);
     try {
         fs.chmodSync(dir, 0o700);
-        const ext = path.extname(row.profile.filePath) || '.txt';
-        const safe = name.replace(/[^\w.-]+/g, '_');
+        const ext = safeExtension(row.profile.filePath);
+        const safe = name.replace(/[^\w.-]+/g, '_').slice(0, 60);
         const candidatePath = path.join(dir, `${safe}.${direction === 'upload' ? 'local' : 'remote'}${ext}`);
         fs.writeFileSync(candidatePath, original, { mode: 0o600 });
 
         let command: string;
         let args: string[];
+        let destPath: string | undefined;
         if (opts.tool === 'code') {
-            const destPath = path.join(dir, `${safe}.${direction === 'upload' ? 'remote' : 'local'}-now${ext}`);
+            destPath = path.join(dir, `${safe}.${direction === 'upload' ? 'remote' : 'local'}-now${ext}`);
             fs.writeFileSync(destPath, destinationNow, { mode: 0o600 });
             [command, args] = ['code', ['--wait', '--diff', destPath, candidatePath]];
         } else {
@@ -117,9 +144,19 @@ export async function editCommand(
             [command, args] = [parts[0], [...parts.slice(1), candidatePath]];
         }
 
-        ctx.stdout.write(style.dim(`Editing the ${direction === 'upload' ? 'local' : 'remote'} version of ${name} (excluded keys hidden). Save and close the editor when done.\n`));
+        const hidden = plan.excludeKeys.length > 0 ? ' (excluded keys hidden)' : '';
+        const which = opts.tool === 'code' ? ' — edit the right-hand side' : '';
+        ctx.stdout.write(style.dim(`Editing the ${direction === 'upload' ? 'local' : 'remote'} version of ${name}${hidden}${which}. Save and close the editor when done.\n`));
         const started = ctx.now();
-        const status = await ctx.runEditor(command, args);
+        let status: number;
+        try {
+            status = await ctx.runEditor(command, args);
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+                throw new UsageError(`Couldn't start the editor "${command}". Set $VISUAL or $EDITOR (e.g. "code --wait", "nano", "vim").`);
+            }
+            throw e;
+        }
         if (status !== 0) {
             ctx.stdout.write(`The editor exited with status ${status}; nothing was written.\n`);
             return EXIT.pending;
@@ -137,12 +174,31 @@ export async function editCommand(
             return EXIT.pending;
         }
 
-        // What the destination loses/gains — not just the edit.
+        if (destPath && fs.readFileSync(destPath, 'utf-8') !== destinationNow) {
+            ctx.stdout.write(style.yellow(`${sym.conflict} Edits to the left-hand (current ${direction === 'upload' ? 'remote' : 'local'}) side are ignored; only the right-hand side is used.\n`));
+        }
+
+        // What the destination loses/gains — not just the edit — and, like
+        // push/pull, say plainly when this overrides the safety rule.
         const diff = renderDiff(destinationNow, edited, `${destLabel} (now)`, `${destLabel} (after ${direction})`, style);
         ctx.stdout.write('\n' + (diff || style.dim('(the destination already holds exactly this)\n')) + '\n');
+        const destination = direction === 'upload' ? 'remote' : 'local';
+        const warnings = [
+            overwritesUnreviewed(plan, direction) && (plan.change === 'unknown'
+                ? `This may overwrite ${destination} changes (no sync history).`
+                : `This overwrites ${destination} changes made since the last sync.`),
+            isLargeDeletion(edited, destinationNow) && `This removes most of the ${destination} content.`
+        ].filter(Boolean);
+        for (const w of warnings) ctx.stdout.write(style.yellow(`${sym.conflict} ${w}\n`));
         const ok = await ctx.prompts.confirm(edited === original ? `Apply ${name} as is (${direction})?` : `Apply this to ${name} (${direction})?`);
         if (!ok) {
             ctx.stdout.write('Nothing was written.\n');
+            return EXIT.pending;
+        }
+        // The editor may still write after returning (e.g. `code` without --wait):
+        // apply only what was shown.
+        if (fs.readFileSync(candidatePath, 'utf-8') !== edited) {
+            ctx.stdout.write(`${style.yellow(sym.conflict)} The file changed after the editor returned; nothing was written. Run \`neon-sync edit ${name}\` again.\n`);
             return EXIT.pending;
         }
 
@@ -152,5 +208,6 @@ export async function editCommand(
         return d.code;
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
+        liveTempDirs.delete(dir);
     }
 }
