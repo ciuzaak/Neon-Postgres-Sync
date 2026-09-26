@@ -240,3 +240,26 @@ test('sync-state writes (atomicWriteJson) retry a transient rename too', () => {
     assert.equal(r.faults, 2);
     assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf-8')), { ok: true });
 });
+
+test('ensureExists never mistakes an inaccessible config for a missing one (it would replace every profile)', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000, transientRetryMs: 50 });
+    addProfile(store, 'keep');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const realStat = fs.statSync;
+    (fs as unknown as Record<string, unknown>).statSync = (p: fs.PathLike, ...rest: unknown[]) => {
+        if (path.basename(String(p)) === 'neon-sync.json') throw Object.assign(new Error('EPERM: injected'), { code: 'EPERM' });
+        return (realStat as (...a: unknown[]) => unknown)(p, ...rest);
+    };
+    try {
+        assert.equal(store.exists(), true);
+        assert.equal(store.ensureExists({ profiles: [{ name: 'example', filePath: '~/e', id: 'e', tableName: 't' }] }), false);
+    } finally {
+        (fs as unknown as Record<string, unknown>).statSync = realStat;
+    }
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+
+    const fresh = new ConfigFileStore(tmpConfig());
+    assert.equal(fresh.exists(), false);
+    assert.equal(fresh.ensureExists({ profiles: [] }), true, 'a really missing file is still created');
+});

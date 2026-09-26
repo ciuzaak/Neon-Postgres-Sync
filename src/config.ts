@@ -40,7 +40,7 @@ function isWriteDenied(e: unknown): boolean {
 /** The extension host must never freeze long on the config lock. */
 const EXTENSION_LOCK_WAIT_MS = 2_000;
 /** ...nor retry Windows' transient file errors for long (per operation). */
-const EXTENSION_TRANSIENT_RETRY_MS = 300;
+export const EXTENSION_TRANSIENT_RETRY_MS = 300;
 
 function isCompleteProfile(value: unknown): value is Profile {
     return incompleteProfileReason(value) === undefined;

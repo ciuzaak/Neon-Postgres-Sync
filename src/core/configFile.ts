@@ -148,8 +148,20 @@ export class ConfigFileStore {
         return this.opts.transientRetryMs ?? TRANSIENT_RETRY_MS;
     }
 
+    /**
+     * Whether the file exists. Only "no such file" counts as missing: existsSync
+     * is false on *any* error, and a config that is briefly inaccessible (on
+     * Windows, while another process renames over it) must never be treated as
+     * absent — ensureExists would then replace every profile.
+     */
     exists(): boolean {
-        return fs.existsSync(this.filePath);
+        try {
+            fs.statSync(this.filePath);
+            return true;
+        } catch (e) {
+            const code = (e as NodeJS.ErrnoException).code;
+            return !(code === 'ENOENT' || code === 'ENOTDIR');
+        }
     }
 
     /**
@@ -250,11 +262,11 @@ export function normalizeProfileForWrite(profile: Profile): Profile {
  * Write JSON to a sibling temp file then rename into place. Prevents
  * leaving the config truncated/empty if the process is killed mid-write.
  */
-export function atomicWriteJson(targetPath: string, value: unknown): void {
+export function atomicWriteJson(targetPath: string, value: unknown, retryMs = TRANSIENT_RETRY_MS): void {
     const tempPath = `${targetPath}.${process.pid}.tmp`;
     fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
     try {
-        retryWindowsTransient(() => fs.renameSync(tempPath, targetPath));
+        retryWindowsTransient(() => fs.renameSync(tempPath, targetPath), undefined, retryMs);
     } catch (error) {
         // Best-effort cleanup; rethrow so callers see the failure.
         try { fs.unlinkSync(tempPath); } catch { /* swallow */ }
