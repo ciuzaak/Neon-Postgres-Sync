@@ -10,7 +10,8 @@ export function incompleteProfileReason(value: unknown): string | undefined {
     const p = value as Record<string, unknown>;
     const missing = ['name', 'filePath', 'id', 'tableName'].filter((k) => typeof p[k] !== 'string' || (p[k] as string).trim() === '');
     if (missing.length > 0) return `no ${missing.join(', ')}`;
-    if (p.excludeKeys !== undefined && !(Array.isArray(p.excludeKeys) && p.excludeKeys.every((k) => typeof k === 'string'))) {
+    // null = absent, as the engine treats it (older hand-edited files).
+    if (p.excludeKeys != null && !(Array.isArray(p.excludeKeys) && p.excludeKeys.every((k) => typeof k === 'string'))) {
         return 'excludeKeys is not a list of strings';
     }
     return undefined;

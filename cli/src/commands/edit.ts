@@ -44,7 +44,7 @@ function safeExtension(filePath: string): string {
  * outside quotes escapes the next character. On Windows backslashes are path
  * separators (C:\tools\vim.exe) and only double quotes group words.
  */
-export function splitCommand(command: string, platform: NodeJS.Platform = process.platform): string[] {
+export function splitCommand(command: string, platform: NodeJS.Platform): string[] {
     const win = platform === 'win32';
     const out: string[] = [];
     let word = '';

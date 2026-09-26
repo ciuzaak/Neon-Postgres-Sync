@@ -130,7 +130,7 @@ async function addProfile(
     interactive: boolean,
     ui: Ui
 ): Promise<ExitCode> {
-    if (args.length > 1) throw new UsageError('Usage: neon-sync profile add [name] --file <path> --id <record id> [--table <name>] [--exclude <key>]…');
+    if (args.length > 1) throw new UsageError('Usage: neon-sync profile add [name] --file <path> --id <record id> [--table <name>] [--exclude <key>]...');
     let name = args[0];
     let file = opts.file;
     let id = opts.id;

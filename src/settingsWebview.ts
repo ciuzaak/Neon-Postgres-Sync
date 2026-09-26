@@ -937,7 +937,7 @@ const SETTINGS_SCRIPT = `
                 setConnectionStatus('', '');
                 renderProfiles(msg.profiles || []);
                 if (msg.configFallback) {
-                    els.configPath.textContent = 'Showing this editor\'s own profiles, read-only: ' + msg.configFallback + '. Profiles normally live in ' + msg.configPath + '.';
+                    els.configPath.textContent = "Showing this editor's own profiles, read-only: " + msg.configFallback + '. Profiles normally live in ' + msg.configPath + '.';
                     els.configPath.hidden = false;
                 } else if (msg.configPath) {
                     els.configPath.textContent = 'Profiles are stored in ' + msg.configPath + ', shared with the neon-sync CLI and your other editors.';

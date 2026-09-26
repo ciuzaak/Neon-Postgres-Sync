@@ -63,7 +63,8 @@ jobs:
             if (JSON.stringify(files) !== JSON.stringify(expected)) { console.error('unexpected package files:', files); process.exit(1); }
             console.log('package files:', files.join(', '));"
       # The oldest Node the package claims (engines), with the bundle just built
-      # by prepack: bundled dependencies (e.g. @clack/prompts) set this floor.
+      # by prepack. This checks the bundle loads and runs there; the prompts
+      # (@clack/prompts, which sets the 20.12 floor) load lazily and aren't reached.
       - uses: actions/setup-node@v5
         with:
           node-version: '20.12.0'

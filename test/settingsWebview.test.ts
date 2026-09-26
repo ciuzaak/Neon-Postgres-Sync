@@ -3,6 +3,7 @@ import assert = require('node:assert/strict');
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as vm from 'node:vm';
 import {
     createMockWebviewPanel,
     installModuleMocks,
@@ -271,6 +272,19 @@ test('saveProfile rejects renaming to a name that collides with another profile'
     // Make sure no profile was overwritten.
     const persisted = ConfigManager.getProfiles();
     assert.equal(persisted.find((p) => p.name === 'a')?.filePath, 'a.json');
+});
+
+test('the rendered webview script parses (it lives in a template literal, where escapes are easy to lose)', () => {
+    const { vscode } = resetMocks();
+    const { SettingsPanel } = loadModules();
+    const panel = createMockWebviewPanel();
+    vscode.__pendingWebviewPanel = panel;
+    SettingsPanel.createOrShow(vscode.Uri.file('/ext') as never);
+
+    const scripts = [...panel.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.equal(scripts.length, 1);
+    // Compile only: a syntax error anywhere kills the whole panel.
+    assert.doesNotThrow(() => new vm.Script(scripts[0]));
 });
 
 test('rendered HTML embeds the same regex source as the host-side validator', () => {

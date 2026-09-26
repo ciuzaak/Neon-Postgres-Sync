@@ -24,6 +24,7 @@ test('an incomplete or duplicated hand-edited profile is a configuration error n
         [[{ name: 'x' }], /Profile #1 "x" in .*neon-sync\.json can't be used \(no filePath, id, tableName\)/],
         [[profile('a'), { ...profile('b'), tableName: 3 }], /Profile #2 "b" .*\(no tableName\)/],
         [[{ ...profile('a'), excludeKeys: 'theme' }], /excludeKeys is not a list of strings/],
+        [[{ ...profile('a'), excludeKeys: [1] }], /excludeKeys is not a list of strings/],
         [[profile('x', { filePath: 'rel' }), profile('x', { filePath: '~/d', id: 'other' })], /Two profiles are named "x"/]
     ];
     for (const [profiles, message] of cases) {
@@ -178,7 +179,7 @@ test('a file on a Windows drive seen from WSL is a row error (exit 4), not a syn
 test('piping into a reader that stops early (| head) ends quietly', { skip: process.platform === 'win32' }, async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-epipe-'));
     const config = path.join(home, 'profiles.json');
-    const profiles = Array.from({ length: 3000 }, (_, i) => profile(`profile-${i}`));
+    const profiles = Array.from({ length: 10000 }, (_, i) => profile(`profile-${i}`));
     fs.writeFileSync(config, JSON.stringify({ profiles }));
     const bin = path.join(__dirname, '..', '..', 'cli', 'src', 'bin.js');
     const env = { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home, NEON_SYNC_DATABASE_URL: 'postgres://u:p@db.example.invalid/db' };
@@ -208,4 +209,9 @@ test('round 2: a missing keychain module is reported on one line', () => {
     const { KeychainUnavailableError } = require('../../cli/src/secrets') as typeof import('../../cli/src/secrets');
     const e = new KeychainUnavailableError(new Error("Cannot find module '@napi-rs/keyring'\nRequire stack:\n- /x/neon-sync.cjs"));
     assert.equal(e.message, "the OS keychain is unavailable (Cannot find module '@napi-rs/keyring'); set NEON_SYNC_DATABASE_URL instead");
+});
+
+test('round 3: "excludeKeys": null is treated as absent, like the engine does', async () => {
+    const f = await cliFixture({ configRaw: JSON.stringify({ profiles: [{ ...profile('a'), excludeKeys: null }] }) });
+    assert.equal((await f.run(['profile', 'list'])).code, 0);
 });
