@@ -24,8 +24,10 @@ Usage:
       --yes                         don't ask: apply only what's safe, skip the rest
       --prefer local|remote         decide the named profiles' conflicts (needs names)
       --dry-run                     show what would be written
-  neon-sync pull <names…|--all>     download (Local ← Remote); --force to overwrite changes
-  neon-sync push <names…|--all>     upload (Remote ← Local);   --force to overwrite changes
+  neon-sync pull <names…|--all>     download (Local ← Remote)
+  neon-sync push <names…|--all>     upload (Remote ← Local)
+      --force                       overwrite a side with its own changes
+                                    (asked per row; unattended only with --yes)
   neon-sync diff <name>             what would change (--direction upload|download)
   neon-sync edit <name>             edit what will be written, in $EDITOR (--tool code)
   neon-sync profile list | show <name> | remove <name> | rename <old> <new>
