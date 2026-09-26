@@ -24,6 +24,14 @@ jobs:
       # package-lock.json is gitignored, so `npm ci` is not available.
       - run: npm install --no-audit --no-fund
       - run: npm test
+      - name: Build the CLI bundle
+        run: npm run build:cli
+      - name: Smoke-test the bundle (no database needed)
+        shell: bash
+        run: |
+          node cli/dist/neon-sync.cjs --version
+          node cli/dist/neon-sync.cjs --help > /dev/null
+          node cli/dist/neon-sync.cjs status --json --config "$RUNNER_TEMP/none.json"
 
   package:
     name: package contents
@@ -44,3 +52,4 @@ jobs:
             exit 1
           fi
           grep -q '^out/core/engine.js$' vsix-files.txt || { echo "::error::out/core missing from the VSIX"; exit 1; }
+          if grep -E '^cli/' vsix-files.txt; then echo "::error::cli/ files in the VSIX"; exit 1; fi

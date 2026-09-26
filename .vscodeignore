@@ -35,3 +35,4 @@ test.txt
 neon-sync.json
 .DS_Store
 out/**/*.map
+cli/**

@@ -220,6 +220,11 @@ export class RecordStore {
         return this.sqlClient;
     }
 
+    /** One round trip (`SELECT 1`): checks the URL, credentials and network. */
+    async ping(): Promise<void> {
+        parseQueryRows(await this.sql.query('SELECT 1 AS ok', []));
+    }
+
     async fetch(profile: Profile): Promise<FetchedRecord> {
         assertValidTableName(profile.tableName);
         const result: unknown = await this.sql.query(selectQuery(profile.tableName), [profile.id]);
