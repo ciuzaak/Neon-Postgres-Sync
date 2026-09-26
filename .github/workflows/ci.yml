@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      # package-lock.json is gitignored, so `npm ci` is not available.
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+
+  package:
+    name: package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run compile
+      - name: List VSIX files
+        run: npx --yes @vscode/vsce ls | tee vsix-files.txt
+      - name: No source maps or dev-only dependencies in the VSIX
+        run: |
+          if grep -E '\.map$|node_modules/@electric-sql/' vsix-files.txt; then
+            echo "::error::Unexpected files in the VSIX (see above)"
+            exit 1
+          fi
+          grep -q '^out/core/engine.js$' vsix-files.txt || { echo "::error::out/core missing from the VSIX"; exit 1; }
