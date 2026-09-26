@@ -65,3 +65,13 @@ test('large deletion counts lines the same way whatever the line endings (traili
         }
     }
 });
+
+test('redactSecrets hides user info and password query parameters, nothing else', () => {
+    const { redactSecrets } = require('../../cli/src/secrets') as typeof import('../../cli/src/secrets');
+    assert.equal(
+        redactSecrets('bad URL postgres://alice:p@ss@h.example/db?sslmode=require&password=SECRET&x=1 for json_records'),
+        'bad URL postgres://[redacted]@h.example/db?sslmode=require&password=[redacted]&x=1 for json_records'
+    );
+    assert.equal(redactSecrets('postgres://alice@h/db?PASSWORD=S3'), 'postgres://[redacted]@h/db?PASSWORD=[redacted]');
+    assert.equal(redactSecrets('no urls here: password=keep'), 'no urls here: password=keep');
+});

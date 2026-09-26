@@ -141,9 +141,12 @@ export function invalidUrlReason(url: string): string | undefined {
  * Remove credentials from text shown to the user: in anything that looks
  * like a postgres:// URL, everything up to the last `@` of that token (user
  * and password) is replaced — quotes or odd characters in the password
- * can't end the match early. Host and database stay readable, and ordinary
- * words elsewhere are never touched.
+ * can't end the match early — and so are password query parameters. Host
+ * and database stay readable, and ordinary words elsewhere are never touched.
  */
 export function redactSecrets(text: string): string {
-    return text.replace(/postgres(?:ql)?:\/\/\S*@/gi, 'postgres://[redacted]@');
+    return text
+        .replace(/postgres(?:ql)?:\/\/\S*@/gi, 'postgres://[redacted]@')
+        // A password can also ride in the query string (?password=…).
+        .replace(/(postgres(?:ql)?:\/\/\S*?[?&](?:password|pass|pwd|sslpassword)=)[^&\s]*/gi, '$1[redacted]');
 }
