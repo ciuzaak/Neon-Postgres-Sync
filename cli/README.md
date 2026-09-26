@@ -19,10 +19,10 @@ $ neon-sync
 ## Install
 
 ```bash
-npm install -g neon-sync
+npm install -g @ciuzaakwong/neon-sync
 ```
 
-Node.js 20.12 or newer. (Or run it without installing: `npx neon-sync`.)
+Node.js 20.12 or newer. The command is `neon-sync`. (Or run it without installing: `npx @ciuzaakwong/neon-sync`.)
 
 ## Quick start
 

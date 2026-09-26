@@ -13,7 +13,7 @@ It should feel **quick, legible and scriptable**: one short command shows what's
 
 1. **Shared config.** Profiles and sync history live in per-user locations that the extension and the CLI both use. The extension migrates its per-editor `globalStorage` config there.
 2. **Secrets.** The CLI reads the connection string from `NEON_SYNC_DATABASE_URL`, else the OS keychain (`@napi-rs/keyring`). The extension keeps VS Code SecretStorage (a native module in the extension would force per-platform VSIX builds), so the URL is set once per tool.
-3. **Distribution.** An npm package `neon-sync` (name available), from `cli/` in this repo, bundled with esbuild into one file that includes `src/core`. `npm i -g neon-sync` / `npx neon-sync`. Node ≥ 20.
+3. **Distribution.** An npm package `@ciuzaakwong/neon-sync` (npm refused the unscoped `neon-sync` as too similar to `neo-async`; the command is still `neon-sync`), from `cli/` in this repo, bundled with esbuild into one file that includes `src/core`. `npm i -g @ciuzaakwong/neon-sync` / `npx @ciuzaakwong/neon-sync`. Node ≥ 20.
 
 ## Non-goals (v1)
 
