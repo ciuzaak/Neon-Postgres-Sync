@@ -419,3 +419,11 @@ test('strip → merge round trip with flat keys reproduces the destination\'s ow
     assert.deepEqual(JSON.parse(merged), { 'editor.fontSize': 14, 'workbench.colorTheme': 'Dark', 'files.eol': '\r\n' });
     assert.equal(stripKeys(merged, paths), stripKeys(remote, paths));
 });
+
+test('a flat form under a candidate non-object is a merge error naming the exact form', () => {
+    // Destination keeps its value at "a" → "b.c"; the candidate made "a" a number.
+    assert.throws(
+        () => mergeBack('{"a": 34}', '{"a": {"b.c": 1}}', parsePaths(['a.b.c'])),
+        (e: unknown) => e instanceof JsoncFilterMergeError && /at "a" → "b\.c":/.test(e.message)
+    );
+});

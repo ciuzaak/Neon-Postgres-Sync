@@ -1,5 +1,6 @@
 import {
     KeyPath,
+    hasFlatForms,
     parsePaths,
     assertJsonc,
     stripKeys,
@@ -7,7 +8,7 @@ import {
     JsoncFilterParseError
 } from './jsoncFilter';
 import type { LocalSnapshot } from './localFile';
-import { filterFingerprint, hashProjection, SyncBaseline, SyncStateKey } from './syncState';
+import { filterFingerprint, hashProjection, legacyFilterFingerprint, SyncBaseline, SyncStateKey } from './syncState';
 import type { FetchedRecord, Profile, SyncDirection } from './types';
 
 // Local mtime (OS clock) and remote update_time (DB server clock) can drift.
@@ -121,7 +122,14 @@ export function planSync(
     let change: ChangeKind = 'unknown';
     let suggestion = timestampSuggestion;
     const bothExist = status === 'pending' && localExists && remoteExists;
-    const baselineUsable = baseline !== undefined && baseline.filterFingerprint === filterFingerprint(excludeKeys);
+    // A baseline from before flat-key matching still applies while neither
+    // side has a flat form: both matchings then strip exactly the same keys.
+    const baselineUsable = baseline !== undefined && (
+        baseline.filterFingerprint === filterFingerprint(excludeKeys) ||
+        (baseline.filterFingerprint === legacyFilterFingerprint(excludeKeys) && !parseError &&
+            !(localExists && hasFlatForms(localOriginal, excludeKeys)) &&
+            !(remoteExists && hasFlatForms(remoteOriginal, excludeKeys)))
+    );
     if (status === 'identical') {
         change = 'none';
     } else if (bothExist && baselineUsable) {

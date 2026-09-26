@@ -12,10 +12,15 @@ export class JsoncFilterParseError extends Error {
     }
 }
 
+/** A concrete path, unambiguous about which dots are inside key names: `"a" → "b.c"`. */
+export function describePath(path: KeyPath): string {
+    return path.map((segment) => JSON.stringify(segment)).join(' → ');
+}
+
 export class JsoncFilterMergeError extends Error {
     constructor(public readonly path: KeyPath, public readonly cause: unknown) {
         super(
-            `Failed to splice destination value back at path "${path.join('.')}": ` +
+            `Failed to splice destination value back at ${describePath(path)}: ` +
             `the candidate's structure makes this path unreachable. ` +
             `Edit the candidate so the path's parents are objects, or remove the candidate's edits in that area.`
         );
@@ -235,6 +240,16 @@ function concretePaths(root: jsoncParser.Node | undefined, written: KeyPath): Ke
     };
     if (root) walk(root, written, []);
     return [...found.values()];
+}
+
+/**
+ * Whether `text` holds any written path in a form other than plain nesting
+ * (a key name containing a dot). Without such forms, matching strips exactly
+ * what the older nesting-only matching did.
+ */
+export function hasFlatForms(text: string, paths: ReadonlyArray<KeyPath>): boolean {
+    const tree = jsoncParser.parseTree(text, [], PARSE_OPTIONS);
+    return paths.some((p) => p.length > 1 && concretePaths(tree, p).some((c) => c.length !== p.length));
 }
 
 /** Delete [start, end) — widened to whole lines when it has its line(s) to itself. */
