@@ -103,9 +103,10 @@ export function describeUrl(url: string): string {
 }
 
 /**
- * Why `url` can't be used, or undefined if it looks usable. Strict enough
- * that the driver won't reject it later — its rejection message quotes the
- * whole URL, password included.
+ * Why `url` can't be used, or undefined if it looks usable. Mirrors what the
+ * Neon driver checks (it re-parses the URL as http: and percent-decodes its
+ * parts), so the driver never rejects a URL we accepted — its rejection
+ * message quotes the whole URL, password included.
  */
 export function invalidUrlReason(url: string): string | undefined {
     const value = url.trim();
@@ -117,25 +118,32 @@ export function invalidUrlReason(url: string): string | undefined {
         return 'it is not a valid URL';
     }
     if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') return 'it must start with postgres:// or postgresql://';
-    if (!u.hostname) return 'it has no host';
+    let http: URL;
+    try {
+        http = new URL(value.replace(/^postgres(ql)?:/i, 'http:'));
+    } catch {
+        return 'its host is not valid';
+    }
+    if (!http.hostname) return 'it has no host';
     if (u.port && !(Number(u.port) >= 1 && Number(u.port) <= 65535)) return 'its port is out of range';
+    if (!http.username) return 'it has no user name';
+    for (const part of [http.username, http.password, http.pathname, http.hostname]) {
+        try {
+            decodeURIComponent(part);
+        } catch {
+            return 'it contains an invalid %-escape';
+        }
+    }
     return undefined;
 }
 
-const URL_IN_TEXT = /postgres(?:ql)?:\/\/[^\s'"`<>]+/gi;
-
 /**
- * Remove connection strings from text shown to the user: any postgres:// URL
- * (drivers quote the URL they reject) and, when known, the configured URL's
- * password wherever it appears.
+ * Remove credentials from text shown to the user: in anything that looks
+ * like a postgres:// URL, everything up to the last `@` of that token (user
+ * and password) is replaced — quotes or odd characters in the password
+ * can't end the match early. Host and database stay readable, and ordinary
+ * words elsewhere are never touched.
  */
-export function redactSecrets(text: string, knownUrl?: string): string {
-    let out = text.replace(URL_IN_TEXT, 'postgres://[redacted]');
-    if (knownUrl) {
-        try {
-            const pw = decodeURIComponent(new URL(knownUrl.trim()).password);
-            if (pw.length >= 3) out = out.split(pw).join('[redacted]');
-        } catch { /* unparseable: the regex above already covered URL-shaped text */ }
-    }
-    return out;
+export function redactSecrets(text: string): string {
+    return text.replace(/postgres(?:ql)?:\/\/\S*@/gi, 'postgres://[redacted]@');
 }

@@ -132,14 +132,6 @@ export class Host {
         return this.cachedConnection;
     }
 
-    /** The URL if one was already resolved this run (for redacting errors). */
-    async knownUrl(): Promise<string | undefined> {
-        try {
-            return this.cachedConnection ? (await this.cachedConnection).url : undefined;
-        } catch {
-            return undefined;
-        }
-    }
 
     /** A SyncEngine for `profiles` (table names validated before connecting). */
     async engine(profiles: Profile[]): Promise<SyncEngine> {

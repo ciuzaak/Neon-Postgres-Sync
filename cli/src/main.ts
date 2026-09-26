@@ -56,7 +56,6 @@ const GLOBAL_FLAGS = ['base', 'config', 'no-color', 'ascii', 'help', 'version'];
 
 /** Run the CLI; returns the exit code (never calls process.exit). */
 export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
-    let host: Host | undefined;
     try {
         let parsed;
         try {
@@ -94,7 +93,7 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
             style: makeStyle(!json && colorEnabled(ctx.stdout.isTTY, ctx.env, !!values['no-color'])),
             sym: values.ascii || asciiByDefault(ctx.pathEnv.platform, ctx.env) ? ASCII : UNICODE
         };
-        host = new Host(ctx, { base: values.base, config: values.config });
+        const host = new Host(ctx, { base: values.base, config: values.config });
         const interactive = ctx.stdinIsTTY && ctx.stdout.isTTY && !json;
 
         switch (command) {
@@ -107,9 +106,8 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         }
         throw new UsageError(`Unknown command "${command}".`);
     } catch (e) {
-        // Never print a connection string: drivers quote rejected URLs verbatim.
-        const known = await host?.knownUrl();
-        const message = redactSecrets(e instanceof Error ? e.message : String(e), known);
+        // Never print credentials: drivers quote rejected URLs verbatim.
+        const message = redactSecrets(e instanceof Error ? e.message : String(e));
         if (e instanceof UsageError || e instanceof KeychainUnavailableError) {
             ctx.stderr.write(`neon-sync: ${message}\n`);
             return EXIT.usage;

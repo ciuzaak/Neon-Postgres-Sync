@@ -175,7 +175,14 @@ test('with the env var set, the native keychain module is never loaded', async (
 
 test('an unusable URL is rejected before the driver sees it (its error would quote the password)', async () => {
     const f = await cliFixture({ profiles: [profile('a')], url: null });
-    for (const bad of ['postgres://alice:S3CRETPW@host:99999/mydb', 'postgres://alice:S3CRETPW@/mydb', 'mysql://alice:S3CRETPW@h/db']) {
+    for (const bad of [
+        'postgres://alice:S3CRETPW@host:99999/mydb',
+        'postgres://alice:S3CRETPW@/mydb',
+        'mysql://alice:S3CRETPW@h/db',
+        "postgres://alice:a'b%zzS3CRETPW@host.example/db",
+        'postgres://:S3CRETPW@host.example/db',
+        'postgres://alice:S3CRETPW@ho%zzst/db'
+    ]) {
         const r = await f.run(['status'], { env: { NEON_SYNC_DATABASE_URL: bad } });
         assert.equal(r.code, 2, bad);
         assert.match(r.stderr, /NEON_SYNC_DATABASE_URL can't be used/);
@@ -183,18 +190,35 @@ test('an unusable URL is rejected before the driver sees it (its error would quo
     }
 });
 
-test('connection strings in driver errors are redacted', async () => {
+test('credentials in driver errors are redacted, whatever characters the password has', async () => {
     const f = await cliFixture({ profiles: [profile('a')], url: 'postgres://alice:S3CRETPW@db.example.test/neondb' });
     f.writeFile('~/a.json', 'x');
     f.pg.sql.transaction = (async () => {
-        throw new Error('Error connecting to database: postgres://alice:S3CRETPW@db.example.test/neondb (password S3CRETPW)');
+        throw new Error("Invalid URL. Connection string: postgres://alice:a'b%zzS3CRETPW@host.example/db (should be: postgres://user:password@host.tld/dbname)");
     }) as never;
 
     const r = await f.run(['status']);
 
     assert.equal(r.code, 3);
     assert.equal(r.stderr.includes('S3CRETPW'), false, r.stderr);
-    assert.match(r.stderr, /postgres:\/\/\[redacted\]/);
+    assert.match(r.stderr, /postgres:\/\/\[redacted\]@host\.example\/db/);
+    assert.match(r.stderr, /postgres:\/\/\[redacted\]@host\.tld\/dbname/, 'host/db stay readable');
+});
+
+test('redaction never touches ordinary words that happen to equal the password', async () => {
+    const f = await cliFixture({ profiles: [profile('a')], url: 'postgres://u:json@db.example.test/neondb' });
+    f.writeFile('~/a.json', 'x');
+    await f.pg.db.exec('ALTER TABLE records RENAME TO gone');
+    const r = await f.run(['status']);
+    assert.equal(r.code, 3);
+    assert.match(r.stderr, /records/);
+});
+
+test('narrow terminals: error-only tables don\'t reserve a stats column; the header fits too', async () => {
+    const f = await cliFixture({ profiles: [profile('a', { filePath: '~/s.json' }), profile('b', { filePath: '~/s.json' })] });
+    const r = await f.run([], { columns: 40 });
+    assert.match(r.stdout, /shared file/);
+    for (const line of r.stdout.split('\n')) assert.ok(line.length <= 40, `${line.length}: ${line}`);
 });
 
 test('narrow terminals: rows fit the width; the path column is dropped before names are unreadable', async () => {

@@ -74,9 +74,10 @@ export async function statusCommand(
 
     const { style, sym } = ui;
     const where = rows.some((r) => r.plan) ? ` ${sym.dot} ${describeUrl((await host.connection()).url)}` : '';
-    ctx.stdout.write(
-        `\n ${style.bold('neon-sync')} ${sym.dot} ${profiles.length} profile${profiles.length === 1 ? '' : 's'}${where} ${sym.dot} ${style.dim(host.display(host.configPath()))}\n\n`
-    );
+    const head = `neon-sync ${sym.dot} ${profiles.length} profile${profiles.length === 1 ? '' : 's'}${where} ${sym.dot} `;
+    const cols = ctx.stdout.columns ?? 100;
+    const configShown = truncateMiddle(host.display(host.configPath()), Math.max(12, cols - 1 - head.length), sym.ellipsis);
+    ctx.stdout.write(`\n ${style.bold('neon-sync')}${head.slice('neon-sync'.length)}${style.dim(configShown)}\n\n`);
     if (profiles.length === 0) {
         ctx.stdout.write('  No profiles yet. Add one with `neon-sync profile add`.\n\n');
         return EXIT.ok;
@@ -87,7 +88,7 @@ export async function statusCommand(
     // too narrow to be useful (`profile show` has it in full).
     const columns = ctx.stdout.columns ?? 100;
     const shownPath = (p: Profile) => host.display(host.resolve(p.filePath) ?? p.filePath);
-    const STATS_W = 10;
+    const STATS_W = rows.some((r) => r.cls.kind === 'auto' || r.cls.kind === 'decide') ? 10 : 0;
     const nameW = Math.min(Math.max(...rows.map((r) => r.profile.name.length)), Math.max(10, Math.floor(columns * 0.3)));
     const labelW = Math.min(Math.max(...rows.map((r) => r.cls.label.length)), 28, Math.max(8, columns - (9 + nameW + STATS_W)));
     const room = columns - (2 + 1 + 2 + nameW + 2 + 2 + labelW + 2 + STATS_W);
