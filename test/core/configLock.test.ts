@@ -130,20 +130,21 @@ test('a writer whose lock was taken over while it stalled does not write its sta
 // ── Windows: transient EPERM/EACCES/EBUSY while another process holds or deletes a path ──
 
 /** Pretend to be Windows and make `fs[method]` fail with `code` for the first `times` calls matching `match`. */
-function withWindowsFaults<T>(method: 'mkdirSync' | 'renameSync', code: string, times: number, match: (p: string) => boolean, fn: () => T): { result?: T; error?: unknown; faults: number } {
+function withWindowsFaults<T>(method: 'mkdirSync' | 'renameSync' | 'readFileSync', code: string | ((n: number) => string), times: number, match: (p: string) => boolean, fn: () => T): { result?: T; error?: unknown; faults: number } {
     const real = fs[method] as (...args: unknown[]) => unknown;
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     let faults = 0;
-    (fs as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
-        const target = String(method === 'renameSync' ? args[1] : args[0]);
-        if (match(target) && faults < times) {
-            faults++;
-            throw Object.assign(new Error(`${code}: operation not permitted, ${method} '${target}'`), { code });
-        }
-        return real.apply(fs, args);
-    };
-    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
     try {
+        (fs as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+            const target = String(method === 'renameSync' ? args[1] : args[0]);
+            if (match(target) && faults < times) {
+                const c = typeof code === 'function' ? code(faults) : code;
+                faults++;
+                throw Object.assign(new Error(`${c}: injected, ${method} '${target}'`), { code: c });
+            }
+            return real.apply(fs, args);
+        };
+        Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
         return { result: fn(), faults };
     } catch (error) {
         return { error, faults };
@@ -198,4 +199,44 @@ test('the same errors are not retried on other platforms, nor other codes on Win
     const started = Date.now();
     assert.throws(() => retryWindowsTransient(f.fn, 'win32', 120), { code: 'EBUSY' });
     assert.ok(f.calls() > 1 && Date.now() - started < 1000, 'retried, but bounded');
+});
+
+test('Windows: a lock that was held and then hits "delete pending" at the deadline is ConfigLockedError, not EPERM', () => {
+    // EEXIST (held by someone) first, then only EPERM: the holder is still around, so this is "busy".
+    const store = new ConfigFileStore(tmpConfig(), { lockWaitMs: 150 });
+    const r = withWindowsFaults('mkdirSync', (n) => (n < 3 ? 'EEXIST' : 'EPERM'), Infinity, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.ok(r.error instanceof ConfigLockedError, String(r.error));
+});
+
+test('Windows: a config briefly unreadable (EPERM while renamed over) is retried; a lasting error is never read as "missing"', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000, transientRetryMs: 150 });
+    addProfile(store, 'keep');
+    const isConfig = (p: string) => path.basename(p) === 'neon-sync.json';
+
+    const brief = withWindowsFaults('readFileSync', 'EPERM', 2, isConfig, () => store.read());
+    assert.deepEqual(brief.result?.profiles.map((p) => p.name), ['keep']);
+
+    // Lasting: update must fail, and must not rebuild the file from an empty list.
+    const before = fs.readFileSync(configPath, 'utf-8');
+    // existsSync reports false on any error (as for a delete-pending file): it must not be what decides "missing".
+    const realExists = fs.existsSync;
+    (fs as unknown as Record<string, unknown>).existsSync = (p: fs.PathLike) => (isConfig(String(p)) ? false : realExists(p));
+    let lasting;
+    try {
+        lasting = withWindowsFaults('readFileSync', 'EPERM', Infinity, isConfig, () => addProfile(store, 'new'));
+    } finally {
+        (fs as unknown as Record<string, unknown>).existsSync = realExists;
+    }
+    assert.ok(lasting.error instanceof Error && lasting.error.name === 'ConfigFileReadError', String(lasting.error));
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+});
+
+test('sync-state writes (atomicWriteJson) retry a transient rename too', () => {
+    const { atomicWriteJson } = require('../../src/core/configFile') as typeof import('../../src/core/configFile');
+    const target = path.join(path.dirname(tmpConfig()), 'state.json');
+    const r = withWindowsFaults('renameSync', 'EBUSY', 2, (p) => p === target, () => atomicWriteJson(target, { ok: true }));
+    assert.equal(r.error, undefined, String(r.error));
+    assert.equal(r.faults, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf-8')), { ok: true });
 });

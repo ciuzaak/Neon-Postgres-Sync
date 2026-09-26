@@ -521,7 +521,8 @@ test('concurrent `profile add` from separate processes: every profile lands (con
         child.stderr.on('data', (d) => { stderr[i] = (stderr[i] ?? '') + d; });
         child.on('close', (c) => resolve(c ?? 1));
     })));
-    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0], stderr.filter(Boolean).join('\n'));
+    const why = stderr.map((e, i) => (e ? `writer ${i}: ${e.trim()}` : '')).filter(Boolean).join('\n');
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0], `exit codes ${codes.join(',')}${why ? `\n${why}` : ''}`);
     const names = JSON.parse(fs.readFileSync(f.configPath, 'utf-8')).profiles.map((p: { name: string }) => p.name).sort();
     assert.deepEqual(names, ['p0', 'p1', 'p2', 'p3', 'p4', 'p5']);
 });

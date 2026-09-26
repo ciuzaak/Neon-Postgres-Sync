@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { isWindowsTransient, retryWindowsTransient, sleepSync, writeFileAtomic } from './localFile';
+import { isWindowsTransient, retryWindowsTransient, sleepSync, TRANSIENT_RETRY_MS, writeFileAtomic } from './localFile';
 import type { ConfigFile, Profile } from './types';
 
 export const CONFIG_FILENAME = 'neon-sync.json';
@@ -51,15 +51,17 @@ const RM_LOCK = { recursive: true, force: true, maxRetries: 5, retryDelay: 20 } 
  * - Every retry sleeps and checks the deadline: waiting is bounded.
  * - On Windows, creating the lock while another process is removing it
  *   fails with EPERM/EACCES ("delete pending") rather than EEXIST: that is
- *   treated as busy too, but if it persists to the deadline it is rethrown
- *   (it may be a real permission problem, which callers handle as such).
+ *   treated as busy too. If only that was seen until the deadline it is
+ *   rethrown (it may be a real permission problem, which callers handle as
+ *   such); if the lock was ever seen held, the wait ends as ConfigLockedError.
  */
-function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => boolean) => T): T {
+function withLock<T>(filePath: string, waitMs: number, retryMs: number, fn: (stillOwned: () => boolean) => T): T {
     const lock = `${filePath}.lock`;
     const takeover = `${lock}.takeover`;
     const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const deadline = Date.now() + waitMs;
     let transient: unknown;
+    let sawHeld = false;
     for (;;) {
         try {
             fs.mkdirSync(lock);
@@ -76,7 +78,7 @@ function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => bo
             } else if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
                 throw e;
             } else {
-                transient = undefined;
+                sawHeld = true;
             }
         }
 
@@ -101,12 +103,13 @@ function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => bo
             }
         }
 
-        if (Date.now() > deadline) throw transient ?? new ConfigLockedError(lock);
+        if (Date.now() > deadline) throw !sawHeld && transient ? transient : new ConfigLockedError(lock);
         sleepSync(25);
     }
     const stillOwned = () => {
         try {
-            return fs.readFileSync(`${lock}/${OWNER_FILE}`, 'utf-8') === token;
+            // (A failed read here would leave our lock behind for LOCK_STALE_MS.)
+            return retryWindowsTransient(() => fs.readFileSync(`${lock}/${OWNER_FILE}`, 'utf-8'), undefined, Math.min(retryMs, 200)) === token;
         } catch {
             return false;
         }
@@ -135,7 +138,15 @@ function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => bo
  * through symlinks (a config managed by a dotfiles tool stays a link).
  */
 export class ConfigFileStore {
-    constructor(public readonly filePath: string, private readonly opts: { lockWaitMs?: number } = {}) {}
+    /**
+     * `lockWaitMs`: how long to wait for another writer's lock.
+     * `transientRetryMs`: per-operation budget for Windows' transient errors.
+     */
+    constructor(public readonly filePath: string, private readonly opts: { lockWaitMs?: number; transientRetryMs?: number } = {}) {}
+
+    private get retryMs(): number {
+        return this.opts.transientRetryMs ?? TRANSIENT_RETRY_MS;
+    }
 
     exists(): boolean {
         return fs.existsSync(this.filePath);
@@ -146,14 +157,14 @@ export class ConfigFileStore {
      * when it exists but can't be read (permissions, EISDIR…) or isn't JSON.
      */
     read(): ConfigFile | undefined {
-        if (!this.exists()) {
-            return undefined;
-        }
+        // Only ENOENT means "missing": existsSync is false on *any* error, and
+        // a file that is briefly unreadable (on Windows, while another process
+        // renames over it) must not be rebuilt from an empty list.
         let parsed: unknown;
         try {
-            // (On Windows a read can briefly fail while another writer renames over the file.)
-            parsed = JSON.parse(retryWindowsTransient(() => fs.readFileSync(this.filePath, 'utf-8')));
+            parsed = JSON.parse(retryWindowsTransient(() => fs.readFileSync(this.filePath, 'utf-8'), undefined, this.retryMs));
         } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
             throw new ConfigFileReadError(this.filePath, e);
         }
         const config = parsed as Partial<ConfigFile> | null;
@@ -177,7 +188,7 @@ export class ConfigFileStore {
     update(mutate: (config: ConfigFile) => ConfigFile | undefined): ConfigFile | undefined {
         if (mutate(structuredClone(this.read() ?? { profiles: [] })) === undefined) return undefined;
         fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-        return withLock(this.filePath, this.opts.lockWaitMs ?? LOCK_WAIT_MS, (stillOwned) => {
+        return withLock(this.filePath, this.opts.lockWaitMs ?? LOCK_WAIT_MS, this.retryMs, (stillOwned) => {
             const current = this.read() ?? { profiles: [] };
             const next = mutate(structuredClone(current));
             if (next === undefined) return undefined;
@@ -185,7 +196,7 @@ export class ConfigFileStore {
             // A writer stalled past LOCK_STALE_MS (e.g. the machine slept) may
             // have been taken over; its read is stale, so it must not write.
             if (!stillOwned()) throw new ConfigLockedError(`${this.filePath}.lock`);
-            writeFileAtomic(this.filePath, JSON.stringify(written, null, 2));
+            writeFileAtomic(this.filePath, JSON.stringify(written, null, 2), this.retryMs);
             return written;
         });
     }

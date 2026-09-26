@@ -39,6 +39,8 @@ function isWriteDenied(e: unknown): boolean {
 
 /** The extension host must never freeze long on the config lock. */
 const EXTENSION_LOCK_WAIT_MS = 2_000;
+/** ...nor retry Windows' transient file errors for long (per operation). */
+const EXTENSION_TRANSIENT_RETRY_MS = 300;
 
 function isCompleteProfile(value: unknown): value is Profile {
     return incompleteProfileReason(value) === undefined;
@@ -93,14 +95,14 @@ export class ConfigManager {
     private static sharedStore(): ConfigFileStore | undefined {
         return this.locations && new ConfigFileStore(
             path.join(this.locations.configDir, CONFIG_FILENAME),
-            { lockWaitMs: EXTENSION_LOCK_WAIT_MS }
+            { lockWaitMs: EXTENSION_LOCK_WAIT_MS, transientRetryMs: EXTENSION_TRANSIENT_RETRY_MS }
         );
     }
 
     private static legacyStore(): ConfigFileStore | undefined {
         return this.globalStorageUri && new ConfigFileStore(
             path.join(this.globalStorageUri.fsPath, CONFIG_FILENAME),
-            { lockWaitMs: EXTENSION_LOCK_WAIT_MS }
+            { lockWaitMs: EXTENSION_LOCK_WAIT_MS, transientRetryMs: EXTENSION_TRANSIENT_RETRY_MS }
         );
     }
 
