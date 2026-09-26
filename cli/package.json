@@ -1,6 +1,6 @@
 {
     "name": "@ciuzaakwong/neon-sync",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Sync local config files with a Neon Postgres table \u2014 the CLI companion to the Neon Postgres Sync VS Code extension",
     "license": "MIT",
     "repository": {

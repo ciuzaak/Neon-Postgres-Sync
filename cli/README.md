@@ -77,7 +77,7 @@ neon-sync profile add app --file ~/.config/app/settings.json --id app-settings \
     --exclude theme --exclude window.zoom
 ```
 
-`--exclude` hides JSON/JSONC keys from syncing: each machine keeps its own value (themes, zoom levels, machine IDs). A dot matches either nesting or a dot in the key name, whichever the file has: `--exclude editor.fontSize` covers VS Code's flat `"editor.fontSize"` as well as `{"editor": {"fontSize": …}}`. (Flat keys are matched by CLI versions newer than 0.1.0 and extension versions newer than 0.8.0 — upgrade both together. After upgrading, a profile whose file has such a flat key and whose sides differ needs one decision, so a `sync --yes` job reports it as pending once.)
+`--exclude` hides JSON/JSONC keys from syncing: each machine keeps its own value (themes, zoom levels, machine IDs). A dot matches either nesting or a dot in the key name, whichever the file has: `--exclude editor.fontSize` covers VS Code's flat `"editor.fontSize"` as well as `{"editor": {"fontSize": …}}`. (Flat keys are matched since CLI 0.2.0 and extension 0.9.0 — upgrade both together. After upgrading, a profile whose file has such a flat key and whose sides differ needs one decision, so a `sync --yes` job reports it as pending once.)
 
 A relative `--file` is resolved against the current directory (or `--base <dir>`), and paths are stored as `~/…` so the same profile works on every machine with the same layout. Each profile needs its own file and its own record.
 
