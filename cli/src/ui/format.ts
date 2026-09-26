@@ -45,10 +45,11 @@ export interface Symbols {
     ellipsis: string;
     minus: string;
     dot: string;
+    arrowLeft: string;
 }
 
-export const UNICODE: Symbols = { inSync: '✓', upload: '↑', download: '↓', conflict: '⚠', unknown: '?', error: '✗', ellipsis: '…', minus: '−', dot: '·' };
-export const ASCII: Symbols = { inSync: '=', upload: '^', download: 'v', conflict: '!', unknown: '?', error: 'x', ellipsis: '...', minus: '-', dot: '|' };
+export const UNICODE: Symbols = { inSync: '✓', upload: '↑', download: '↓', conflict: '⚠', unknown: '?', error: '✗', ellipsis: '…', minus: '−', dot: '·', arrowLeft: '←' };
+export const ASCII: Symbols = { inSync: '=', upload: '^', download: 'v', conflict: '!', unknown: '?', error: 'x', ellipsis: '...', minus: '-', dot: '|', arrowLeft: '<-' };
 
 export function rowSymbol(row: RowClass, sym: Symbols, style: Style): string {
     switch (row.kind) {

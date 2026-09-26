@@ -32,6 +32,7 @@ export interface Output {
     write(text: string): void;
     isTTY: boolean;
     columns?: number;
+    rows?: number;
 }
 
 /**
@@ -49,12 +50,22 @@ export interface CliContext {
     keychain: Keychain;
     createStore(url: string): RecordStore;
     prompts: Prompter;
+    /** Show long text through a pager; returns false if none could run (caller prints it). */
+    page(text: string): boolean;
 }
 
-/** Interactive prompts; tests script the answers. */
+export interface Choice<T extends string> {
+    value: T;
+    label: string;
+    hint?: string;
+}
+
+/** Interactive prompts; tests script the answers. `undefined` = cancelled. */
 export interface Prompter {
     password(message: string): Promise<string | undefined>;
     confirm(message: string): Promise<boolean | undefined>;
+    select<T extends string>(message: string, choices: Choice<T>[]): Promise<T | undefined>;
+    multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[]): Promise<T[] | undefined>;
 }
 
 export function defaultContext(): CliContext {
@@ -62,7 +73,8 @@ export function defaultContext(): CliContext {
         stdout: {
             write: (t) => { process.stdout.write(t); },
             isTTY: !!process.stdout.isTTY,
-            get columns() { return process.stdout.columns; }
+            get columns() { return process.stdout.columns; },
+            get rows() { return process.stdout.rows; }
         },
         stderr: { write: (t) => { process.stderr.write(t); }, isTTY: !!process.stderr.isTTY },
         stdinIsTTY: !!process.stdin.isTTY,
@@ -75,8 +87,19 @@ export function defaultContext(): CliContext {
         pathEnv: currentPathEnv(),
         keychain: new OsKeychain(),
         createStore: (url) => new RecordStore(url),
-        prompts: clackPrompter()
+        prompts: clackPrompter(),
+        page: (text) => runPager(text, process.env)
     };
+}
+
+/** $PAGER (default `less -R`; none on Windows unless $PAGER is set). */
+function runPager(text: string, env: NodeJS.ProcessEnv): boolean {
+    const pager = env.PAGER || (process.platform === 'win32' ? undefined : 'less -R');
+    if (!pager) return false;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { spawnSync } = require('child_process') as typeof import('child_process');
+    const result = spawnSync(pager, { input: text, stdio: ['pipe', 'inherit', 'inherit'], shell: true });
+    return result.status === 0;
 }
 
 function clackPrompter(): Prompter {
@@ -90,6 +113,20 @@ function clackPrompter(): Prompter {
         async confirm(message) {
             const value = await clack().confirm({ message });
             return clack().isCancel(value) ? undefined : value;
+        },
+        async select(message, choices) {
+            const options = choices.map((c) => ({ value: c.value, label: c.label, hint: c.hint }));
+            const value = await clack().select({ message, options: options as never });
+            return clack().isCancel(value) ? undefined : value as typeof choices[number]['value'];
+        },
+        async multiselect(message, choices, initial) {
+            const value = await clack().multiselect({
+                message,
+                options: choices.map((c) => ({ value: c.value, label: c.label, hint: c.hint })) as never,
+                initialValues: initial as never,
+                required: false
+            });
+            return clack().isCancel(value) ? undefined : value as typeof initial;
         }
     };
 }

@@ -191,9 +191,16 @@ export function createMockSql(): MockSql {
     return sql;
 }
 
+/**
+ * Drop every compiled project module (extension, core and CLI) from the
+ * require cache, so the next require gets fresh instances wired to the
+ * current mocks. Leaving any layer cached would mix class identities across
+ * tests (e.g. an `instanceof StaleRemoteError` check against a stale copy).
+ */
 export function purgeProjectModules(): void {
+    const roots = ['src', 'cli'].map((dir) => `${path.sep}out-test${path.sep}${dir}${path.sep}`);
     for (const key of Object.keys(require.cache)) {
-        if (key.includes(`${path.sep}out-test${path.sep}src${path.sep}`)) {
+        if (roots.some((root) => key.includes(root))) {
             delete require.cache[key];
         }
     }

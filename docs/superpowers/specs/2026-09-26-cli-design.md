@@ -40,6 +40,8 @@ A row is applied **without an explicit per-row decision** only when the directio
 - interactively, a per-row prompt ("Keep which side?"), which states what will be overwritten;
 - non-interactively, `--prefer local|remote` **together with explicit profile names** (`sync env --prefer local --yes`). Naming the profile is the decision; `--prefer` without names is a usage error, so no blanket "resolve every conflict one way" exists.
 
+**Never from a missing side.** Any decision whose *source* side doesn't exist — `pull` of a missing record, `push` of a missing file, or "keep local" for a file deleted since the last sync — is refused: it would write empty content over the other side. Deletions are not synced (non-goal); a deleted side can only be restored from the other one, or the row skipped. `--prefer` applies only to rows that need a decision; rows with a known direction follow it.
+
 **Forcing a direction** with `pull`/`push` over a destination that changed since the last sync, or whose status is unknown, is a destructive override: confirmed per row interactively (naming what is lost), and requiring `--force` with `--yes`. Overwriting an unchanged side needs nothing extra. (`sync` has no `--force`.)
 
 ---

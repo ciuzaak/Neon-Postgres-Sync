@@ -79,8 +79,11 @@ export async function cliFixture(opts: {
                 prompts: {
                     password: async () => undefined,
                     confirm: async () => undefined,
+                    select: async () => undefined,
+                    multiselect: async () => undefined,
                     ...runOpts.prompts
-                } as Prompter
+                } as Prompter,
+                page: () => false
             };
             const code = await main(argv, ctx);
             return { code, stdout, stderr };
