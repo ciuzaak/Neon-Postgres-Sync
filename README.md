@@ -59,7 +59,18 @@ If you trigger a sync without a connection string configured, the error toast wi
 
 ### 3. Editing the JSON directly
 
-Profiles are persisted to `neon-sync.json` under VS Code's global storage. Power users can open the raw file via `Neon Sync: Open Settings (JSON)`.
+Profiles live in one per-user file shared by every editor with this extension installed (VS Code, Cursor, …) and by the upcoming `neon-sync` CLI:
+
+| | Profiles | Sync history (per machine) |
+|---|---|---|
+| macOS / Linux | `~/.config/neon-sync/neon-sync.json` | `~/.local/state/neon-sync/sync-state/` |
+| Windows | `%APPDATA%\neon-sync\neon-sync.json` | `%LOCALAPPDATA%\neon-sync\sync-state\` |
+
+These locations are fixed (environment variables such as `XDG_CONFIG_HOME` are ignored) so that every tool reads the same history. Open the file via `Neon Sync: Open Settings (JSON)`; the settings panel shows its path too. The file may be a symlink (e.g. managed by a dotfiles tool) — writes go to its target.
+
+**Upgrading:** on first launch, each editor moves its own profiles (previously kept in that editor's private storage) into the shared file. Profiles with the same name keep the shared version, profiles pointing at a file another profile already uses are skipped, and a notification lists what was added. The old per-editor file is kept as a backup (any legacy plaintext connection string is moved into secure storage first). Downgrading the extension afterwards reads that old backup; edits made there are not merged back.
+
+File paths may start with `~/`. Relative paths are resolved against the first workspace folder (the CLI won't accept them), so prefer `~/…` or absolute paths — `Browse…` stores those.
 
 Example `neon-sync.json`:
 
@@ -68,13 +79,13 @@ Example `neon-sync.json`:
     "profiles": [
         {
             "name": "My Config",
-            "filePath": "config/settings.json",
+            "filePath": "~/.config/app/settings.json",
             "id": "app-settings",
             "tableName": "json_records"
         },
         {
             "name": "Env Variables",
-            "filePath": ".env",
+            "filePath": "~/projects/app/.env",
             "id": "env-vars",
             "tableName": "app_config"
         }
@@ -155,7 +166,7 @@ With `excludeKeys`, changes confined to the filtered keys don't count. If one si
 
 **No sync history yet** (first sync on this machine, or the profile's `excludeKeys` changed since): the newer timestamp wins — local `mtime` vs remote `update_time` — unless they are within 5 seconds of each other or either is missing, in which case you're asked to pick (`Download (Local ← Remote)` / `Upload (Remote ← Local)`; dismissing aborts). Local `mtime` comes from the OS clock while `update_time` comes from the Neon server, so small gaps are unreliable. Profiles that are already in sync get a history record the first time they're checked.
 
-In every case the diff opens in the chosen direction and you can still swap before confirming. Sync history lives in VS Code's global storage (`sync-state/`), never in the database.
+In every case the diff opens in the chosen direction and you can still swap before confirming. Sync history lives on each machine (see the table above), never in the database.
 
 ## Origin
 

@@ -11,6 +11,9 @@ All notable changes to the "neon-postgres-sync" extension will be documented in 
 - **Shared-File Check**: Profiles that point at the same local file are refused at sync time; they would corrupt each other's sync history.
 
 ### Changed
+- **Shared Profile Location**: Profiles now live in `~/.config/neon-sync/neon-sync.json` (`%APPDATA%\neon-sync` on Windows), shared by every editor with the extension and by the upcoming `neon-sync` CLI; sync history is per machine in `~/.local/state/neon-sync` (`%LOCALAPPDATA%` on Windows). Each editor migrates its previous profiles on first launch (same-name profiles keep the shared version; a notification lists what was added) and keeps its old file as a backup. Downgrading afterwards reads the old backup.
+- **Safer Profile Edits**: Profile changes are applied under a lock to the latest file content, so edits from another editor (or the CLI) aren't overwritten; editing a profile that was renamed or removed elsewhere is reported. A corrupt `neon-sync.json` is never overwritten anymore — fix it (the error names the file) instead of losing every profile on the next save.
+- **Portable File Paths**: `~/…` is supported in profile paths, and `Browse…` stores `~/…` (or absolute) paths instead of workspace-relative ones.
 - **One Sync at a Time**: `Sync File` and `Sync Multiple Profiles…` are refused while a sync diff is still open (finish or cancel it first). Previously a second sync silently replaced the open diff and left its temp files behind.
 
 ### Fixed

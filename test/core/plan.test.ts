@@ -368,3 +368,14 @@ test('round trip with excludeKeys: after an upload, both sides plan as identical
     // Later, a remote-only change is attributed to the remote.
     assert.equal(planSync(p, local(first.localOriginal), remote(withTheme(18, 'light', ' // why 14')), baseline).change, 'remote');
 });
+
+test('baselineExists tells first-time setup from a side deleted since the last sync', () => {
+    const fresh = planSync(profile(), local(null), remote('theirs'));
+    const deleted = planSync(profile(), local(null), remote('theirs'), baselineOf('theirs'));
+
+    assert.equal(fresh.baselineExists, false);
+    assert.equal(deleted.baselineExists, true);
+    // Filter changes make a baseline unusable, but it still exists.
+    const refiltered = planSync(profile({ excludeKeys: ['x'] }), local('{}'), remote('{"a":1}'), baselineOf('{}'));
+    assert.deepEqual([refiltered.change, refiltered.baselineExists], ['unknown', true]);
+});

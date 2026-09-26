@@ -61,6 +61,13 @@ export interface SyncPlan extends MergeContext {
     remoteVersion: string | null;
     status: PlanStatus;
     change: ChangeKind;
+    /**
+     * A baseline exists for this profile on this machine (usable or not).
+     * With one side missing, this distinguishes first-time setup (no
+     * baseline: copying the other side over is safe) from a side deleted
+     * since the last sync (restoring it may undo a deliberate deletion).
+     */
+    baselineExists: boolean;
     suggestion: DirectionSuggestion;
     parseError?: JsoncFilterParseError;
 }
@@ -153,6 +160,7 @@ export function planSync(
         excludeKeys,
         status,
         change,
+        baselineExists: baseline !== undefined,
         suggestion,
         parseError
     };

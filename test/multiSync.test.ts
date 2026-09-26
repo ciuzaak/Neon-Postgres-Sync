@@ -3,7 +3,7 @@ import assert = require('node:assert/strict');
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createMockSql, installModuleMocks, purgeProjectModules, resetMocks } from './helpers/moduleMocks';
+import { createMockSql, installModuleMocks, purgeProjectModules, resetMocks, testLocations } from './helpers/moduleMocks';
 import type { Profile } from '../src/config';
 
 installModuleMocks();
@@ -35,14 +35,15 @@ async function setup(rows: Array<{
     const { MultiSyncManager } = require('../src/multiSync') as typeof import('../src/multiSync');
 
     const secrets = new Map<string, string>();
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-multi-cfg-'));
     ConfigManager.initialize({
-        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-multi-cfg-'))),
+        globalStorageUri: vscode.Uri.file(storageDir),
         secrets: {
             get: async (k: string) => secrets.get(k),
             store: async (k: string, v: string) => { secrets.set(k, v); },
             delete: async (k: string) => { secrets.delete(k); }
         }
-    } as never);
+    } as never, testLocations(storageDir));
     await ConfigManager.setConnectionString('postgres://example');
     await ConfigManager.saveProfiles([...rows.map((r) => r.profile), ...extraSelected]);
 

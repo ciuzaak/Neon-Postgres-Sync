@@ -6,7 +6,8 @@ import {
     createMockSql,
     installModuleMocks,
     purgeProjectModules,
-    resetMocks
+    resetMocks,
+    testLocations
 } from './helpers/moduleMocks';
 import type { Profile } from '../src/config';
 
@@ -23,15 +24,16 @@ async function configureConnection(connectionString: string) {
     const { vscode, neon } = resetMocks();
     const { ConfigManager, DatabaseService } = loadModules();
     const secrets = new Map<string, string>();
+    const storageDir = fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`);
     ConfigManager.initialize({
-        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`)),
+        globalStorageUri: vscode.Uri.file(storageDir),
         secrets: {
             get: async (key: string) => secrets.get(key),
             store: async (key: string, value: string) => {
                 secrets.set(key, value);
             }
         }
-    } as never);
+    } as never, testLocations(storageDir));
     await ConfigManager.setConnectionString(connectionString);
     return { DatabaseService, neon };
 }
@@ -49,10 +51,11 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 test('createSyncEngine rejects unsafe table names before resolving the connection (no missing-URL prompt)', async () => {
     const { vscode, neon } = resetMocks();
     const { ConfigManager } = loadModules();
+    const storageDir = fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`);
     ConfigManager.initialize({
-        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`)),
+        globalStorageUri: vscode.Uri.file(storageDir),
         secrets: { get: async () => undefined, store: async () => undefined, delete: async () => undefined }
-    } as never);
+    } as never, testLocations(storageDir));
     const { createSyncEngine } = require('../src/hostEngine') as typeof import('../src/hostEngine');
 
     await assert.rejects(
@@ -67,14 +70,15 @@ test('getRecordStore triggers the missing-URL prompt and throws when no connecti
     const { vscode, neon } = resetMocks();
     const { ConfigManager, DatabaseService } = loadModules();
     const secrets = new Map<string, string>();
+    const storageDir = fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`);
     ConfigManager.initialize({
-        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(`${os.tmpdir()}/neon-sync-db-`)),
+        globalStorageUri: vscode.Uri.file(storageDir),
         secrets: {
             get: async (key: string) => secrets.get(key),
             store: async (key: string, value: string) => { secrets.set(key, value); },
             delete: async (key: string) => { secrets.delete(key); }
         }
-    } as never);
+    } as never, testLocations(storageDir));
 
     await assert.rejects(
         DatabaseService.getRecordStore(),

@@ -57,10 +57,17 @@ function toggleSelectAllInMultiPicker(): void {
     }
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "neon-postgres-sync" is now active!');
 
     ConfigManager.initialize(context);
+    try {
+        // Before anything reads profiles: move this editor's profiles into
+        // the shared config once (no-op afterwards).
+        await ConfigManager.migrateLegacyConfig();
+    } catch (error) {
+        console.error('Neon Sync: profile migration failed:', error);
+    }
     let profileOrder = context.globalState.get<string[]>(PROFILE_ORDER_STATE_KEY, []);
 
     const validKeys = (profiles: Profile[]): Set<string> => {

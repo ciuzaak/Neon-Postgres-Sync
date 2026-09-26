@@ -121,7 +121,28 @@ let originalLoad: ModuleLoader | undefined;
 let currentVscode = createVscodeMock();
 let currentNeon = createNeonMock();
 
+/**
+ * Tests must never touch the real per-user config/state (core/paths reads
+ * the home directory). Point every home-ish variable at a throwaway dir as
+ * soon as any test file installs the mocks.
+ */
+function isolateHome(): void {
+    if (process.env.NEON_SYNC_TEST_HOME) return;
+    const home = require('node:fs').mkdtempSync(path.join(require('node:os').tmpdir(), 'neon-sync-test-home-'));
+    process.env.NEON_SYNC_TEST_HOME = home;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.APPDATA = path.join(home, 'AppData', 'Roaming');
+    process.env.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
+}
+
+/** Shared-config locations for ConfigManager.initialize in tests: config lives in `configDir`. */
+export function testLocations(configDir: string): { configDir: string; stateDir: string } {
+    return { configDir, stateDir: path.join(configDir, '.state') };
+}
+
 export function installModuleMocks(): void {
+    isolateHome();
     if (originalLoad) return;
     originalLoad = moduleWithLoad._load;
     moduleWithLoad._load = function patchedLoad(

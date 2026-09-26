@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { expandHome } from './paths';
 
 export interface LocalSnapshot {
     exists: boolean;
@@ -20,11 +21,13 @@ export function readLocalFile(absolutePath: string): LocalSnapshot {
 }
 
 /**
- * Absolute paths pass through; relative paths are anchored to `baseDir` when
- * one is given (the VS Code host passes the first workspace folder), otherwise
- * left for the OS to resolve against the process cwd.
+ * `~` expands to the home directory; absolute paths pass through; relative
+ * paths are anchored to `baseDir` when one is given (the VS Code host passes
+ * the first workspace folder), otherwise left for the OS to resolve against
+ * the process cwd. (The CLI refuses relative paths without --base.)
  */
 export function resolveProfilePath(filePath: string, baseDir: string | undefined): string {
+    filePath = expandHome(filePath);
     if (path.isAbsolute(filePath)) {
         return filePath;
     }
@@ -104,18 +107,29 @@ export function writeFileAtomic(absolutePath: string, content: string): void {
 }
 
 /**
- * A key that is equal for two paths naming the same file, as far as can be
- * told without the file existing: resolved, symlinks followed where they
- * exist, and case-folded on the usually case-insensitive macOS/Windows.
+ * The path with symlinks resolved as far as possible without the file
+ * existing: the file's real path, else its parent's real path plus its name,
+ * else just the resolved path.
  */
-export function samePathKey(absolutePath: string): string {
-    let resolved = path.resolve(absolutePath);
+export function realPathOrParent(absolutePath: string): string {
+    const resolved = path.resolve(absolutePath);
     try {
-        resolved = fs.realpathSync.native(resolved);
+        return fs.realpathSync.native(resolved);
     } catch {
         try {
-            resolved = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved));
-        } catch { /* parent missing too: keep as resolved */ }
+            return path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved));
+        } catch {
+            return resolved; // parent missing too
+        }
     }
-    return process.platform === 'darwin' || process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * A key that is equal for two paths naming the same file, as far as can be
+ * told without the file existing: symlinks followed where they exist, and
+ * case-folded on the usually case-insensitive macOS/Windows.
+ */
+export function samePathKey(absolutePath: string): string {
+    const real = realPathOrParent(absolutePath);
+    return process.platform === 'darwin' || process.platform === 'win32' ? real.toLowerCase() : real;
 }

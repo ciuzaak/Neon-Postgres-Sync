@@ -1,7 +1,7 @@
 import test = require('node:test');
 import assert = require('node:assert/strict');
 import * as path from 'node:path';
-import { installModuleMocks, purgeProjectModules, resetMocks } from './helpers/moduleMocks';
+import { installModuleMocks, purgeProjectModules, resetMocks, testLocations } from './helpers/moduleMocks';
 
 installModuleMocks();
 
@@ -38,14 +38,15 @@ async function setupSingle(p: Profile, local: string, remote: string, opts: { lo
     const { ConfigManager } = require('../src/config') as typeof import('../src/config');
     const { SyncManager } = require('../src/sync') as typeof import('../src/sync');
     const secrets = new Map<string, string>();
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-single-cfg-'));
     ConfigManager.initialize({
-        globalStorageUri: vscode.Uri.file(fs.mkdtempSync(path.join(os.tmpdir(), 'neon-sync-single-cfg-'))),
+        globalStorageUri: vscode.Uri.file(storageDir),
         secrets: {
             get: async (k: string) => secrets.get(k),
             store: async (k: string, v: string) => { secrets.set(k, v); },
             delete: async (k: string) => { secrets.delete(k); }
         }
-    } as never);
+    } as never, testLocations(storageDir));
     await ConfigManager.setConnectionString('postgres://pglite');
     await ConfigManager.saveProfiles([p]);
 
