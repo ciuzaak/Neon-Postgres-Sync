@@ -11,6 +11,8 @@ export interface SyncEngineDeps {
     /** Profile filePath → absolute path (the host decides what relative paths anchor to). */
     resolvePath: (filePath: string) => string;
     now?: () => Date;
+    /** Per-write budget for Windows' transient file errors (see retryWindowsTransient). */
+    transientRetryMs?: number;
 }
 
 export interface ApplyRequest {
@@ -210,7 +212,7 @@ export class SyncEngine {
                     continue;
                 }
                 if (!(plan.localExists && p.localBytes === plan.localOriginal)) {
-                    writeFileAtomic(p.localPath, p.localBytes);
+                    writeFileAtomic(p.localPath, p.localBytes, this.deps.transientRetryMs);
                 }
             } catch (e) {
                 outcomes.set(p.request, {

@@ -74,6 +74,37 @@ function resolveWriteTarget(absolutePath: string): string {
     throw new Error(`Too many levels of symbolic links: ${absolutePath}`);
 }
 
+export function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Errors Windows returns for a moment while another process has the path
+ * open or is deleting it (a directory being removed stays "delete pending";
+ * antivirus scanners open freshly written files). Elsewhere they are real.
+ */
+const WINDOWS_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/** Default retry budget for one operation. Hosts that must not block long (the extension) pass less. */
+export const TRANSIENT_RETRY_MS = 1000;
+
+export function isWindowsTransient(e: unknown, platform: NodeJS.Platform = process.platform): boolean {
+    return platform === 'win32' && WINDOWS_TRANSIENT.has((e as NodeJS.ErrnoException)?.code ?? '');
+}
+
+/** Run `fn`, retrying Windows' transient errors for up to `waitMs`; anything else (or on other platforms) throws at once. */
+export function retryWindowsTransient<T>(fn: () => T, platform: NodeJS.Platform = process.platform, waitMs = TRANSIENT_RETRY_MS): T {
+    const deadline = Date.now() + waitMs;
+    for (let delay = 10; ; delay = Math.min(delay * 2, 100)) {
+        try {
+            return fn();
+        } catch (e) {
+            if (!isWindowsTransient(e, platform) || Date.now() + delay > deadline) throw e;
+            sleepSync(delay);
+        }
+    }
+}
+
 /**
  * Replace `absolutePath`'s content atomically: write a sibling temp file, then
  * rename it over the target, so a failure midway (disk full, size limit,
@@ -88,7 +119,7 @@ function resolveWriteTarget(absolutePath: string): string {
  * - A directory that can't take the temp file fails the write rather than
  *   falling back to an in-place write, which could leave a fragment.
  */
-export function writeFileAtomic(absolutePath: string, content: string): void {
+export function writeFileAtomic(absolutePath: string, content: string, retryMs = TRANSIENT_RETRY_MS): void {
     const target = resolveWriteTarget(absolutePath);
     let mode: number | undefined;
     if (fs.existsSync(target)) {
@@ -99,7 +130,9 @@ export function writeFileAtomic(absolutePath: string, content: string): void {
     try {
         fs.writeFileSync(temp, content, mode === undefined ? undefined : { mode });
         if (mode !== undefined) fs.chmodSync(temp, mode);
-        fs.renameSync(temp, target);
+        // A read-only file was refused above; a denial that access() can't see
+        // (a Windows ACL) still fails, only after the retry budget.
+        retryWindowsTransient(() => fs.renameSync(temp, target), undefined, retryMs);
     } catch (e) {
         try { fs.unlinkSync(temp); } catch { /* swallow: may not exist */ }
         throw e;

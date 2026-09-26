@@ -126,3 +126,140 @@ test('a writer whose lock was taken over while it stalled does not write its sta
 
     assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['theirs']);
 });
+
+// ── Windows: transient EPERM/EACCES/EBUSY while another process holds or deletes a path ──
+
+/** Pretend to be Windows and make `fs[method]` fail with `code` for the first `times` calls matching `match`. */
+function withWindowsFaults<T>(method: 'mkdirSync' | 'renameSync' | 'readFileSync', code: string | ((n: number) => string), times: number, match: (p: string) => boolean, fn: () => T): { result?: T; error?: unknown; faults: number } {
+    const real = fs[method] as (...args: unknown[]) => unknown;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    let faults = 0;
+    try {
+        (fs as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+            const target = String(method === 'renameSync' ? args[1] : args[0]);
+            if (match(target) && faults < times) {
+                const c = typeof code === 'function' ? code(faults) : code;
+                faults++;
+                throw Object.assign(new Error(`${c}: injected, ${method} '${target}'`), { code: c });
+            }
+            return real.apply(fs, args);
+        };
+        Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+        return { result: fn(), faults };
+    } catch (error) {
+        return { error, faults };
+    } finally {
+        (fs as unknown as Record<string, unknown>)[method] = real;
+        Object.defineProperty(process, 'platform', platform);
+    }
+}
+
+const addProfile = (store: ConfigFileStore, name: string) =>
+    store.update((c) => ({ ...c, profiles: [...c.profiles, { name, filePath: `~/${name}`, id: name, tableName: 't' }] }));
+
+test('Windows: a lock being deleted by another process (EPERM on mkdir) is waited for, not an error', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000 });
+    const r = withWindowsFaults('mkdirSync', 'EPERM', 3, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.equal(r.error, undefined, String(r.error));
+    assert.equal(r.faults, 3);
+    assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['a']);
+    assert.equal(fs.existsSync(`${configPath}.lock`), false);
+});
+
+test('Windows: an EPERM that persists past the lock deadline is rethrown as itself (a real permission problem)', () => {
+    const store = new ConfigFileStore(tmpConfig(), { lockWaitMs: 150 });
+    const r = withWindowsFaults('mkdirSync', 'EPERM', Infinity, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.equal((r.error as NodeJS.ErrnoException)?.code, 'EPERM');
+    assert.ok(!(r.error instanceof ConfigLockedError));
+});
+
+test('Windows: replacing the config while a reader has it open (EPERM/EBUSY on rename) is retried', () => {
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+        const configPath = tmpConfig();
+        const store = new ConfigFileStore(configPath, { lockWaitMs: 2000 });
+        addProfile(store, 'first');
+        const r = withWindowsFaults('renameSync', code, 2, (p) => path.basename(p) === 'neon-sync.json', () => addProfile(store, 'second'));
+        assert.equal(r.error, undefined, `${code}: ${String(r.error)}`);
+        assert.equal(r.faults, 2, code);
+        assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['first', 'second'], code);
+        assert.deepEqual(fs.readdirSync(path.dirname(configPath)).filter((f) => f.endsWith('.tmp')), [], `${code}: no temp file left`);
+    }
+});
+
+test('the same errors are not retried on other platforms, nor other codes on Windows', () => {
+    const { retryWindowsTransient } = require('../../src/core/localFile') as typeof import('../../src/core/localFile');
+    const failing = (code: string) => { let n = 0; return { fn: () => { n++; throw Object.assign(new Error(code), { code }); }, calls: () => n }; };
+    for (const [platform, code] of [['linux', 'EPERM'], ['darwin', 'EBUSY'], ['win32', 'ENOENT'], ['win32', 'ENOSPC']] as const) {
+        const f = failing(code);
+        assert.throws(() => retryWindowsTransient(f.fn, platform, 500), { code });
+        assert.equal(f.calls(), 1, `${platform} ${code}`);
+    }
+    const f = failing('EBUSY');
+    const started = Date.now();
+    assert.throws(() => retryWindowsTransient(f.fn, 'win32', 120), { code: 'EBUSY' });
+    assert.ok(f.calls() > 1 && Date.now() - started < 1000, 'retried, but bounded');
+});
+
+test('Windows: a lock that was held and then hits "delete pending" at the deadline is ConfigLockedError, not EPERM', () => {
+    // EEXIST (held by someone) first, then only EPERM: the holder is still around, so this is "busy".
+    const store = new ConfigFileStore(tmpConfig(), { lockWaitMs: 150 });
+    const r = withWindowsFaults('mkdirSync', (n) => (n < 3 ? 'EEXIST' : 'EPERM'), Infinity, (p) => p.endsWith('.lock'), () => addProfile(store, 'a'));
+    assert.ok(r.error instanceof ConfigLockedError, String(r.error));
+});
+
+test('Windows: a config briefly unreadable (EPERM while renamed over) is retried; a lasting error is never read as "missing"', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000, transientRetryMs: 150 });
+    addProfile(store, 'keep');
+    const isConfig = (p: string) => path.basename(p) === 'neon-sync.json';
+
+    const brief = withWindowsFaults('readFileSync', 'EPERM', 2, isConfig, () => store.read());
+    assert.deepEqual(brief.result?.profiles.map((p) => p.name), ['keep']);
+
+    // Lasting: update must fail, and must not rebuild the file from an empty list.
+    const before = fs.readFileSync(configPath, 'utf-8');
+    // existsSync reports false on any error (as for a delete-pending file): it must not be what decides "missing".
+    const realExists = fs.existsSync;
+    (fs as unknown as Record<string, unknown>).existsSync = (p: fs.PathLike) => (isConfig(String(p)) ? false : realExists(p));
+    let lasting;
+    try {
+        lasting = withWindowsFaults('readFileSync', 'EPERM', Infinity, isConfig, () => addProfile(store, 'new'));
+    } finally {
+        (fs as unknown as Record<string, unknown>).existsSync = realExists;
+    }
+    assert.ok(lasting.error instanceof Error && lasting.error.name === 'ConfigFileReadError', String(lasting.error));
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+});
+
+test('sync-state writes (atomicWriteJson) retry a transient rename too', () => {
+    const { atomicWriteJson } = require('../../src/core/configFile') as typeof import('../../src/core/configFile');
+    const target = path.join(path.dirname(tmpConfig()), 'state.json');
+    const r = withWindowsFaults('renameSync', 'EBUSY', 2, (p) => p === target, () => atomicWriteJson(target, { ok: true }));
+    assert.equal(r.error, undefined, String(r.error));
+    assert.equal(r.faults, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf-8')), { ok: true });
+});
+
+test('ensureExists never mistakes an inaccessible config for a missing one (it would replace every profile)', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath, { lockWaitMs: 2000, transientRetryMs: 50 });
+    addProfile(store, 'keep');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const realStat = fs.statSync;
+    (fs as unknown as Record<string, unknown>).statSync = (p: fs.PathLike, ...rest: unknown[]) => {
+        if (path.basename(String(p)) === 'neon-sync.json') throw Object.assign(new Error('EPERM: injected'), { code: 'EPERM' });
+        return (realStat as (...a: unknown[]) => unknown)(p, ...rest);
+    };
+    try {
+        assert.equal(store.exists(), true);
+        assert.equal(store.ensureExists({ profiles: [{ name: 'example', filePath: '~/e', id: 'e', tableName: 't' }] }), false);
+    } finally {
+        (fs as unknown as Record<string, unknown>).statSync = realStat;
+    }
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+
+    const fresh = new ConfigFileStore(tmpConfig());
+    assert.equal(fresh.exists(), false);
+    assert.equal(fresh.ensureExists({ profiles: [] }), true, 'a really missing file is still created');
+});

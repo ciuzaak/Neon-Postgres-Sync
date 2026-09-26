@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ConfigManager, Profile } from './config';
+import { ConfigManager, EXTENSION_TRANSIENT_RETRY_MS, Profile } from './config';
 import { DatabaseService } from './db';
 import { assertValidTableName } from './core/db';
 import { profilesSharingLocalFiles, SyncEngine } from './core/engine';
@@ -54,5 +54,10 @@ export async function createSyncEngine(profiles: Profile[]): Promise<SyncEngine>
     if (!stateDir) {
         throw new Error('Extension not initialized correctly.');
     }
-    return new SyncEngine({ store, state: new SyncStateStore(stateDir), resolvePath: resolveWorkspacePath });
+    return new SyncEngine({
+        store,
+        state: new SyncStateStore(stateDir, EXTENSION_TRANSIENT_RETRY_MS),
+        resolvePath: resolveWorkspacePath,
+        transientRetryMs: EXTENSION_TRANSIENT_RETRY_MS
+    });
 }
