@@ -2,7 +2,7 @@
 
 All notable changes to the "neon-postgres-sync" extension will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] - 2026-09-26
 ### Added
 - **`neon-sync` CLI** (new npm package `@ciuzaakwong/neon-sync`, [cli/README.md](cli/README.md)): the same sync from the terminal — `status`, `sync`, `pull`, `push`, `diff`, `edit`, profile management, `init-db` — sharing profiles and sync history with the extension. Applies only changes whose direction is known to be safe (conflicts, syncs without history where both sides exist, deletions and large deletions are always asked about), `--yes`/`--json` for scripts, and exit codes for cron.
 - **Change Detection by Sync History**: Each machine records what both sides looked like after its last sync of a profile. The next sync compares each side against that record instead of against the other side's clock: only local changed → upload, only remote changed → download, both changed → an explicit conflict prompt. Profiles with no history yet fall back to the timestamp rule.

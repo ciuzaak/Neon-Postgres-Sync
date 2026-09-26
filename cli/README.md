@@ -33,7 +33,7 @@ neon-sync profile add zsh --file ~/.zshrc --id zshrc
 neon-sync                     # what's out of sync — then offers to apply it
 ```
 
-Already using the VS Code extension? Its profiles are picked up automatically once an extension version with shared profiles (the release after 0.7.0) has run on that machine — just set the URL.
+Already using the VS Code extension? Its profiles are picked up automatically once the extension (0.8.0 or later) has run on that machine — just set the URL.
 
 ## How it decides what to do
 
