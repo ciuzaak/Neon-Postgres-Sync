@@ -20,7 +20,7 @@ export interface CliFixture {
     configPath: string;
     pg: Awaited<ReturnType<typeof createPgliteSql>>;
     keychain: Keychain & { value?: string };
-    run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter> }): Promise<RunResult>;
+    run(argv: string[], opts?: { stdin?: string; tty?: boolean; env?: Record<string, string>; prompts?: Partial<Prompter>; columns?: number }): Promise<RunResult>;
     file(p: string): string;
     writeFile(p: string, content: string, mtime?: Date): void;
     remote(id: string): Promise<string | undefined>;
@@ -65,7 +65,7 @@ export async function cliFixture(opts: {
             let stderr = '';
             const tty = runOpts.tty ?? false;
             const ctx: CliContext = {
-                stdout: { write: (t) => { stdout += t; }, isTTY: tty, columns: 120 },
+                stdout: { write: (t) => { stdout += t; }, isTTY: tty, columns: runOpts.columns ?? 120 },
                 stderr: { write: (t) => { stderr += t; }, isTTY: tty },
                 stdinIsTTY: tty,
                 readStdin: async () => runOpts.stdin ?? '',

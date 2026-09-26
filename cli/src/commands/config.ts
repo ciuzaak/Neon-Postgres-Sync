@@ -1,6 +1,6 @@
 import { CliContext, EXIT, ExitCode, UsageError } from '../context';
 import { Host } from '../host';
-import { describeUrl, looksLikePostgresUrl, URL_ENV } from '../secrets';
+import { describeUrl, invalidUrlReason, URL_ENV } from '../secrets';
 import type { Ui } from './status';
 
 export async function configCommand(ctx: CliContext, host: Host, args: string[], ui: Ui): Promise<ExitCode> {
@@ -26,8 +26,9 @@ export async function configCommand(ctx: CliContext, host: Host, args: string[],
                 url = (await ctx.readStdin()).split(/\r?\n/)[0];
             }
             url = url.trim();
-            if (!looksLikePostgresUrl(url)) {
-                throw new UsageError('That doesn\'t look like a postgres:// or postgresql:// URL.');
+            const invalid = invalidUrlReason(url);
+            if (invalid) {
+                throw new UsageError(`That URL can't be used: ${invalid}. Nothing was saved.`);
             }
             await ctx.keychain.set(url);
             ctx.stdout.write(`${ui.style.green(ui.sym.inSync)} Saved the URL for ${describeUrl(url)} in the OS keychain.\n`);

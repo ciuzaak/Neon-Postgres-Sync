@@ -1,4 +1,4 @@
-import { candidateFor, computeDiffStats, SyncPlan } from '../../src/core/plan';
+import { candidateFor, computeDiffStats, countLines, SyncPlan } from '../../src/core/plan';
 import type { SyncDirection } from '../../src/core/types';
 
 /**
@@ -28,9 +28,8 @@ export interface RowClass {
 export function isLargeDeletion(candidate: string, destination: string): boolean {
     if (destination.trim() === '') return false;
     if (candidate.trim() === '') return true;
-    const destLines = destination.split(/\r\n|\r|\n/).length;
     const { removed } = computeDiffStats(candidate, destination, 'upload'); // lines of destination not kept
-    return removed >= 10 && removed > destLines / 2;
+    return removed >= 10 && removed > countLines(destination) / 2;
 }
 
 export function classify(plan: SyncPlan): RowClass {

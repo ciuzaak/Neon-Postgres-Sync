@@ -1,7 +1,7 @@
 {
     "name": "neon-sync",
     "version": "0.1.0",
-    "description": "Sync local config files with a Neon Postgres table — the CLI companion to the Neon Postgres Sync VS Code extension",
+    "description": "Sync local config files with a Neon Postgres table \u2014 the CLI companion to the Neon Postgres Sync VS Code extension",
     "license": "MIT",
     "repository": {
         "type": "git",
@@ -12,13 +12,14 @@
         "neon-sync": "dist/neon-sync.cjs"
     },
     "files": [
-        "dist"
+        "dist",
+        "LICENSE"
     ],
     "engines": {
         "node": ">=20"
     },
     "scripts": {
-        "prepack": "npm --prefix .. run build:cli"
+        "prepack": "npm --prefix .. run build:cli && node -e \"require('fs').copyFileSync('../LICENSE','LICENSE')\""
     },
     "dependencies": {
         "@napi-rs/keyring": "^2.1.0"

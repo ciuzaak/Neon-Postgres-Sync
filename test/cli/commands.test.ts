@@ -47,6 +47,17 @@ test('config set-url prompts (hidden) on a terminal; cancelling stores nothing',
     assert.equal(f.keychain.value, 'postgresql://u:p@h/db');
 });
 
+test('config set-url rejects URLs the driver would reject, saving nothing and echoing nothing', async () => {
+    const f = await cliFixture({ url: null });
+    for (const bad of ['postgres://alice:S3CRETPW@host:99999/mydb', 'postgres://alice:S3CRETPW@/mydb', 'postgres://a b@h/db']) {
+        const r = await f.run(['config', 'set-url'], { stdin: bad });
+        assert.equal(r.code, 2, bad);
+        assert.match(r.stderr, /That URL can't be used: .*Nothing was saved\./);
+        assert.equal(r.stderr.includes('S3CRETPW'), false);
+    }
+    assert.equal(f.keychain.value, undefined);
+});
+
 test('config set-url notes that the env var takes precedence', async () => {
     const f = await cliFixture({ url: null });
     const r = await f.run(['config', 'set-url'], { stdin: 'postgres://u:p@h/db', env: { NEON_SYNC_DATABASE_URL: 'postgres://e' } });
@@ -114,6 +125,13 @@ test('--config points a run at another profiles file', async () => {
     const r = await f.run(['profile', 'list', '--config', other]);
     assert.match(r.stdout, /other/);
     assert.equal(r.stdout.includes('default'), false);
+});
+
+test('a profile name in command position gets a hint', async () => {
+    const f = await cliFixture({ profiles: [profile('zsh')] });
+    const r = await f.run(['zsh']);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /Unknown command "zsh"\. Profile names go after a command, e\.g\. `neon-sync status zsh`/);
 });
 
 test('--help and --version', async () => {

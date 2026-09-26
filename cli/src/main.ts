@@ -5,7 +5,7 @@ import { profileCommand } from './commands/profile';
 import { statusCommand, type Ui } from './commands/status';
 import { CliContext, EXIT, ExitCode, UsageError } from './context';
 import { Host } from './host';
-import { KeychainUnavailableError } from './secrets';
+import { KeychainUnavailableError, redactSecrets } from './secrets';
 import { ASCII, asciiByDefault, colorEnabled, makeStyle, UNICODE } from './ui/format';
 
 declare const __NEON_SYNC_VERSION__: string | undefined;
@@ -56,6 +56,7 @@ const GLOBAL_FLAGS = ['base', 'config', 'no-color', 'ascii', 'help', 'version'];
 
 /** Run the CLI; returns the exit code (never calls process.exit). */
 export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
+    let host: Host | undefined;
     try {
         let parsed;
         try {
@@ -78,10 +79,9 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         const [command = 'status', ...args] = positionals;
         const accepted = COMMAND_FLAGS[command];
         if (!accepted) {
-            throw new UsageError(`Unknown command "${command}". See \`neon-sync --help\`.`);
-        }
-        if (positionals.length === 0 && args.length > 0) {
-            throw new UsageError('Profile names go after a command, e.g. `neon-sync status <names…>`.');
+            throw new UsageError(
+                `Unknown command "${command}". Profile names go after a command, e.g. \`neon-sync status ${command}\`. See \`neon-sync --help\`.`
+            );
         }
         for (const flag of Object.keys(values)) {
             if (!GLOBAL_FLAGS.includes(flag) && !accepted.includes(flag)) {
@@ -94,7 +94,7 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
             style: makeStyle(!json && colorEnabled(ctx.stdout.isTTY, ctx.env, !!values['no-color'])),
             sym: values.ascii || asciiByDefault(ctx.pathEnv.platform, ctx.env) ? ASCII : UNICODE
         };
-        const host = new Host(ctx, { base: values.base, config: values.config });
+        host = new Host(ctx, { base: values.base, config: values.config });
         const interactive = ctx.stdinIsTTY && ctx.stdout.isTTY && !json;
 
         switch (command) {
@@ -107,11 +107,15 @@ export async function main(argv: string[], ctx: CliContext): Promise<ExitCode> {
         }
         throw new UsageError(`Unknown command "${command}".`);
     } catch (e) {
-        if (e instanceof UsageError || e instanceof KeychainUnavailableError || e instanceof ConfigLockedError) {
-            ctx.stderr.write(`neon-sync: ${e.message}\n`);
+        // Never print a connection string: drivers quote rejected URLs verbatim.
+        const known = await host?.knownUrl();
+        const message = redactSecrets(e instanceof Error ? e.message : String(e), known);
+        if (e instanceof UsageError || e instanceof KeychainUnavailableError) {
+            ctx.stderr.write(`neon-sync: ${message}\n`);
             return EXIT.usage;
         }
-        ctx.stderr.write(`neon-sync: error: ${e instanceof Error ? e.message : String(e)}\n`);
+        // A held config lock is temporary ("try again"): a runtime failure, not a config error.
+        ctx.stderr.write(`neon-sync: ${e instanceof ConfigLockedError ? '' : 'error: '}${message}\n`);
         return EXIT.failure;
     }
 }

@@ -7,7 +7,7 @@ import { abbreviateHome, configDir, expandHome, stateDir, wslBoundaryError } fro
 import { SYNC_STATE_DIRNAME, SyncStateStore } from '../../src/core/syncState';
 import type { Profile } from '../../src/core/types';
 import { CliContext, UsageError } from './context';
-import { resolveUrl, URL_ENV, UrlSource } from './secrets';
+import { invalidUrlReason, resolveUrl, URL_ENV, UrlSource } from './secrets';
 
 export interface GlobalOptions {
     /** Base directory for relative profile paths (--base). */
@@ -113,12 +113,32 @@ export class Host {
         return out;
     }
 
-    async connection(): Promise<{ url: string; source: UrlSource }> {
-        const found = await resolveUrl(this.ctx.env, this.ctx.keychain);
-        if (!found) {
-            throw new UsageError(`No database URL. Run \`neon-sync config set-url\`, or set ${URL_ENV}.`);
+    private cachedConnection?: Promise<{ url: string; source: UrlSource }>;
+
+    /** The URL and its source; read once per run (a keychain read can prompt on macOS). */
+    connection(): Promise<{ url: string; source: UrlSource }> {
+        this.cachedConnection ??= (async () => {
+            const found = await resolveUrl(this.ctx.env, this.ctx.keychain);
+            if (!found) {
+                throw new UsageError(`No database URL. Run \`neon-sync config set-url\`, or set ${URL_ENV}.`);
+            }
+            const invalid = invalidUrlReason(found.url);
+            if (invalid) {
+                const where = found.source === 'env' ? URL_ENV : 'the stored URL';
+                throw new UsageError(`${where} can't be used: ${invalid}. Fix it with \`neon-sync config set-url\`.`);
+            }
+            return found;
+        })();
+        return this.cachedConnection;
+    }
+
+    /** The URL if one was already resolved this run (for redacting errors). */
+    async knownUrl(): Promise<string | undefined> {
+        try {
+            return this.cachedConnection ? (await this.cachedConnection).url : undefined;
+        } catch {
+            return undefined;
         }
-        return found;
     }
 
     /** A SyncEngine for `profiles` (table names validated before connecting). */

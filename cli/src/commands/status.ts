@@ -82,27 +82,32 @@ export async function statusCommand(
         return EXIT.ok;
     }
 
-    const nameW = Math.max(...rows.map((r) => r.profile.name.length));
-    const labelW = Math.min(40, Math.max(...rows.map((r) => r.cls.label.length)));
+    // Layout: symbol, name, path, label, stats. On narrow terminals names and
+    // labels are shortened first; the path column is dropped when it would be
+    // too narrow to be useful (`profile show` has it in full).
     const columns = ctx.stdout.columns ?? 100;
     const shownPath = (p: Profile) => host.display(host.resolve(p.filePath) ?? p.filePath);
-    const available = columns - (2 + 3 + nameW + 2 + 2 + labelW + 2 + 12);
-    const pathW = Math.max(12, Math.min(48, available, Math.max(...rows.map((r) => shownPath(r.profile).length))));
+    const STATS_W = 10;
+    const nameW = Math.min(Math.max(...rows.map((r) => r.profile.name.length)), Math.max(10, Math.floor(columns * 0.3)));
+    const labelW = Math.min(Math.max(...rows.map((r) => r.cls.label.length)), 28, Math.max(8, columns - (9 + nameW + STATS_W)));
+    const room = columns - (2 + 1 + 2 + nameW + 2 + 2 + labelW + 2 + STATS_W);
+    const pathW = room >= 12 ? Math.min(48, room, Math.max(...rows.map((r) => shownPath(r.profile).length))) : 0;
+    const clip = (text: string, width: number) => text.length <= width ? text : text.slice(0, Math.max(1, width - sym.ellipsis.length)) + sym.ellipsis;
 
     for (const { profile, cls } of rows) {
         const stats = cls.kind === 'auto'
             ? `${style.green(`+${cls.added}`)} ${style.red(`${sym.minus}${cls.removed}`)}`
             : cls.kind === 'decide' ? style.yellow('decide') : '';
-        const shown = truncateMiddle(cls.label, labelW, sym.ellipsis);
+        const shown = clip(cls.label, labelW);
         const label = cls.kind === 'error' ? style.red(shown) : shown;
         const labelPad = ' '.repeat(Math.max(0, labelW - shown.length));
+        const pathCell = pathW > 0 ? `${style.dim(pad(truncateMiddle(shownPath(profile), pathW, sym.ellipsis), pathW))}  ` : '';
         ctx.stdout.write(
-            `  ${rowSymbol(cls, sym, style)}  ${pad(profile.name, nameW)}  ` +
-            `${style.dim(pad(truncateMiddle(shownPath(profile), pathW, sym.ellipsis), pathW))}  ` +
+            `  ${rowSymbol(cls, sym, style)}  ${pad(clip(profile.name, nameW), nameW)}  ${pathCell}` +
             `${label}${labelPad}  ${stats}`.trimEnd() + '\n'
         );
         if (cls.kind === 'error' && cls.detail) {
-            ctx.stdout.write(`       ${style.dim(cls.detail)}\n`);
+            ctx.stdout.write(`       ${style.dim(clip(cls.detail, Math.max(20, columns - 7)))}\n`);
         }
     }
 

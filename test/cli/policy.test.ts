@@ -53,3 +53,15 @@ test('forcing a direction over a changed or unknown destination is a destructive
     assert.equal(overwritesUnreviewed(plan('a', null, 'a'), 'upload'), false, 'destination missing: nothing overwritten');
     assert.equal(overwritesUnreviewed(plan('x', 'x'), 'upload'), false, 'identical');
 });
+
+test('large deletion counts lines the same way whatever the line endings (trailing newline, CR-only)', () => {
+    const lines = (n: number, eol: string, trailing: boolean) => Array.from({ length: n }, (_, i) => `l${i}`).join(eol) + (trailing ? eol : '');
+    for (const eol of ['\n', '\r\n', '\r']) {
+        for (const trailing of [false, true]) {
+            const label = JSON.stringify({ eol, trailing });
+            assert.equal(isLargeDeletion(lines(9, eol, trailing), lines(19, eol, trailing)), true, `10 of 19 removed ${label}`);
+            assert.equal(isLargeDeletion(lines(10, eol, trailing), lines(19, eol, trailing)), false, `9 of 19 removed ${label}`);
+            assert.equal(isLargeDeletion('l0', lines(30, eol, trailing)), true, `truncated to one line ${label}`);
+        }
+    }
+});

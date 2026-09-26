@@ -10,3 +10,4 @@ test.txt
 neon-sync.json
 package-lock.json
 cli/dist/
+cli/LICENSE

@@ -102,6 +102,40 @@ export function describeUrl(url: string): string {
     }
 }
 
-export function looksLikePostgresUrl(url: string): boolean {
-    return /^postgres(ql)?:\/\/\S+$/i.test(url.trim());
+/**
+ * Why `url` can't be used, or undefined if it looks usable. Strict enough
+ * that the driver won't reject it later — its rejection message quotes the
+ * whole URL, password included.
+ */
+export function invalidUrlReason(url: string): string | undefined {
+    const value = url.trim();
+    if (/\s/.test(value)) return 'it contains whitespace';
+    let u: URL;
+    try {
+        u = new URL(value);
+    } catch {
+        return 'it is not a valid URL';
+    }
+    if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') return 'it must start with postgres:// or postgresql://';
+    if (!u.hostname) return 'it has no host';
+    if (u.port && !(Number(u.port) >= 1 && Number(u.port) <= 65535)) return 'its port is out of range';
+    return undefined;
+}
+
+const URL_IN_TEXT = /postgres(?:ql)?:\/\/[^\s'"`<>]+/gi;
+
+/**
+ * Remove connection strings from text shown to the user: any postgres:// URL
+ * (drivers quote the URL they reject) and, when known, the configured URL's
+ * password wherever it appears.
+ */
+export function redactSecrets(text: string, knownUrl?: string): string {
+    let out = text.replace(URL_IN_TEXT, 'postgres://[redacted]');
+    if (knownUrl) {
+        try {
+            const pw = decodeURIComponent(new URL(knownUrl.trim()).password);
+            if (pw.length >= 3) out = out.split(pw).join('[redacted]');
+        } catch { /* unparseable: the regex above already covered URL-shaped text */ }
+    }
+    return out;
 }

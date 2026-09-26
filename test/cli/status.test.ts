@@ -133,11 +133,77 @@ test('no database URL is a configuration error (exit 2) that says how to fix it'
     assert.match(r.stderr, /No database URL\. Run `neon-sync config set-url`, or set NEON_SYNC_DATABASE_URL/);
 });
 
-test('NEON_SYNC_DATABASE_URL wins over the keychain', async () => {
-    const f = await cliFixture({ profiles: [profile('a')], url: null });
+test('NEON_SYNC_DATABASE_URL wins over the keychain, which is then never read', async () => {
+    const f = await cliFixture({ profiles: [profile('a')], url: 'postgres://u:p@keychain.example/kdb' });
     f.writeFile('~/a.json', 'x');
-    const r = await f.run(['status', '--json'], { env: { NEON_SYNC_DATABASE_URL: 'postgres://u:p@env.example/db' } });
+    let reads = 0;
+    const get = f.keychain.get.bind(f.keychain);
+    f.keychain.get = async () => { reads += 1; return get(); };
+
+    const r = await f.run(['status'], { env: { NEON_SYNC_DATABASE_URL: 'postgres://u:p@env.example/edb' } });
+
     assert.equal(r.code, 1);
+    assert.match(r.stdout, /env\.example\/edb/);
+    assert.equal(r.stdout.includes('keychain.example'), false);
+    assert.equal(reads, 0);
+});
+
+test('status reads the keychain once per run (a read can prompt on macOS)', async () => {
+    const f = await cliFixture({ profiles: [profile('a')] });
+    f.writeFile('~/a.json', 'x');
+    let reads = 0;
+    const get = f.keychain.get.bind(f.keychain);
+    f.keychain.get = async () => { reads += 1; return get(); };
+
+    await f.run(['status']);
+
+    assert.equal(reads, 1);
+});
+
+test('with the env var set, the native keychain module is never loaded', async () => {
+    const f = await cliFixture({ profiles: [], url: null });
+    const { OsKeychain } = require('../../cli/src/secrets') as typeof import('../../cli/src/secrets');
+    for (const key of Object.keys(require.cache)) if (key.includes('@napi-rs')) delete require.cache[key];
+    const osKeychain = new OsKeychain();
+    f.keychain.get = () => osKeychain.get(); // would load the module if called
+
+    const r = await f.run(['config', 'test'], { env: { NEON_SYNC_DATABASE_URL: 'postgres://u:p@env.example/db' } });
+
+    assert.equal(r.code, 0);
+    assert.equal(Object.keys(require.cache).some((k) => k.includes('@napi-rs')), false);
+});
+
+test('an unusable URL is rejected before the driver sees it (its error would quote the password)', async () => {
+    const f = await cliFixture({ profiles: [profile('a')], url: null });
+    for (const bad of ['postgres://alice:S3CRETPW@host:99999/mydb', 'postgres://alice:S3CRETPW@/mydb', 'mysql://alice:S3CRETPW@h/db']) {
+        const r = await f.run(['status'], { env: { NEON_SYNC_DATABASE_URL: bad } });
+        assert.equal(r.code, 2, bad);
+        assert.match(r.stderr, /NEON_SYNC_DATABASE_URL can't be used/);
+        assert.equal((r.stdout + r.stderr).includes('S3CRETPW'), false, bad);
+    }
+});
+
+test('connection strings in driver errors are redacted', async () => {
+    const f = await cliFixture({ profiles: [profile('a')], url: 'postgres://alice:S3CRETPW@db.example.test/neondb' });
+    f.writeFile('~/a.json', 'x');
+    f.pg.sql.transaction = (async () => {
+        throw new Error('Error connecting to database: postgres://alice:S3CRETPW@db.example.test/neondb (password S3CRETPW)');
+    }) as never;
+
+    const r = await f.run(['status']);
+
+    assert.equal(r.code, 3);
+    assert.equal(r.stderr.includes('S3CRETPW'), false, r.stderr);
+    assert.match(r.stderr, /postgres:\/\/\[redacted\]/);
+});
+
+test('narrow terminals: rows fit the width; the path column is dropped before names are unreadable', async () => {
+    const f = await cliFixture({ profiles: [profile('a-rather-long-profile-name'), profile('b', { filePath: 'rel.md' })] });
+    f.writeFile('~/a-rather-long-profile-name.json', 'x');
+    const r = await f.run([], { columns: 40 });
+    for (const line of r.stdout.split('\n')) {
+        if (/^ {2}\S {2}/.test(line)) assert.ok(line.length <= 40, `${line.length}: ${line}`);
+    }
 });
 
 test('a database failure is a runtime error (exit 3)', async () => {

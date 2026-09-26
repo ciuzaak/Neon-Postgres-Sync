@@ -379,3 +379,8 @@ test('baselineExists tells first-time setup from a side deleted since the last s
     const refiltered = planSync(profile({ excludeKeys: ['x'] }), local('{}'), remote('{"a":1}'), baselineOf('{}'));
     assert.deepEqual([refiltered.change, refiltered.baselineExists], ['unknown', true]);
 });
+
+test('computeDiffStats: bare-CR files have lines too, and a final newline is not an extra line', () => {
+    assert.deepEqual(computeDiffStats('a\rb\rc', 'a', 'upload'), { added: 2, removed: 0 });
+    assert.deepEqual(computeDiffStats('a\nb\n', 'a\nb', 'upload'), { added: 0, removed: 0 });
+});
