@@ -75,17 +75,17 @@ test('a fresh non-directory lock is waited on and then reported, never spun on f
     assert.ok(Date.now() - started < 2000);
 });
 
-test('release only removes our own lock (a lock taken over from us survives our release)', () => {
+test('release only removes our own lock (a lock taken over from us survives, and we do not write)', () => {
     const configPath = tmpConfig();
     const store = new ConfigFileStore(configPath);
-    store.update((c) => {
+    assert.throws(() => store.update((c) => {
         if (!fs.existsSync(`${configPath}.lock`)) return c; // the unlocked dry run
         // Simulate: while we hold it, someone else's lock replaces ours.
         fs.rmSync(`${configPath}.lock`, { recursive: true });
         fs.mkdirSync(`${configPath}.lock`);
         fs.writeFileSync(`${configPath}.lock/owner`, 'someone-else');
         return c;
-    });
+    }), ConfigLockedError);
     assert.equal(fs.readFileSync(`${configPath}.lock/owner`, 'utf-8'), 'someone-else');
 });
 
@@ -108,4 +108,21 @@ test('ensureExists never reads an existing (possibly corrupt) file', () => {
     fs.writeFileSync(configPath, '{ corrupt');
     assert.equal(new ConfigFileStore(configPath).ensureExists({ profiles: [] }), false);
     assert.equal(fs.readFileSync(configPath, 'utf-8'), '{ corrupt');
+});
+
+test('a writer whose lock was taken over while it stalled does not write its stale read', () => {
+    const configPath = tmpConfig();
+    const store = new ConfigFileStore(configPath);
+    store.saveProfiles([{ name: 'before', filePath: '~/b', id: 'b', tableName: 't' }]);
+
+    assert.throws(() => store.update((c) => {
+        if (fs.existsSync(`${configPath}.lock`)) {
+            // Stalled past the stale timeout: another writer took over and wrote.
+            fs.writeFileSync(`${configPath}.lock/owner`, 'someone-else');
+            fs.writeFileSync(configPath, JSON.stringify({ profiles: [{ name: 'theirs', filePath: '~/t', id: 't', tableName: 't' }] }));
+        }
+        return { ...c, profiles: [...c.profiles, { name: 'mine', filePath: '~/m', id: 'm', tableName: 't' }] };
+    }), ConfigLockedError);
+
+    assert.deepEqual(store.read()!.profiles.map((p) => p.name), ['theirs']);
 });

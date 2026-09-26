@@ -392,3 +392,35 @@ test('setting the URL works with a read-only config directory', { skip: process.
         fs.chmodSync(path.dirname(sharedPath), 0o755);
     }
 });
+
+test('a read-only shared config (e.g. home-manager) stays in use; profiles only this editor had are reported once, not copied', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+    const { ConfigManager, vscode, legacyPath, sharedPath } = setupMigration(
+        { profiles: [P('legacyOnly'), P('nixA')] },
+        { profiles: [P('nixA'), P('nixB')] }
+    );
+    fs.chmodSync(path.dirname(sharedPath), 0o555);
+    try {
+        const report = await ConfigManager.migrateLegacyConfig();
+
+        assert.deepEqual(report?.notCopied, ['legacyOnly']);
+        assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['nixA', 'nixB'], 'the managed list, not the legacy one');
+        assert.match(vscode.window.warningMessages.at(-1)!, /read-only here, so these profiles from this editor were not added: legacyOnly/);
+        assert.ok(fs.existsSync(`${legacyPath}.migrated`), 'not re-attempted on every launch');
+        assert.equal(await ConfigManager.migrateLegacyConfig(), undefined);
+    } finally {
+        fs.chmodSync(path.dirname(sharedPath), 0o755);
+    }
+});
+
+test('a busy lock on the very first migration shows this editor\'s profiles (read-only) for the session', async () => {
+    const { ConfigManager, sharedPath } = setupMigration({ profiles: [P('a')] });
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.mkdirSync(`${sharedPath}.lock`);
+    try {
+        await ConfigManager.migrateLegacyConfig();
+        assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['a']);
+        assert.equal(ConfigManager.updateProfiles((ps) => ps), undefined, 'read-only meanwhile');
+    } finally {
+        fs.rmdirSync(`${sharedPath}.lock`);
+    }
+});

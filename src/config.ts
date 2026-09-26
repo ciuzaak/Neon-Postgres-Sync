@@ -27,6 +27,13 @@ export interface MigrationReport {
     skippedSameFile: string[];
     /** Entries missing a name, file, id or table: left in the backup, not copied. */
     skippedInvalid: string[];
+    /** Set when the shared file couldn't be written (e.g. read-only, managed elsewhere): nothing was copied. */
+    notCopied?: string[];
+}
+
+function isWriteDenied(e: unknown): boolean {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
 }
 
 /** The extension host must never freeze long on the config lock. */
@@ -162,9 +169,25 @@ export class ConfigManager {
             });
         } catch (e) {
             if (e instanceof ConfigLockedError) {
-                // Busy, not broken: keep using the shared file; retry next launch.
+                // Busy, not broken: retry next launch. Until then show this
+                // editor's own profiles (read-only) if there's no shared file yet.
+                if (!shared.exists()) this.legacyFallback = true;
                 vscode.window.showWarningMessage(`Neon Sync will move this editor's profiles to the shared config next time: ${e.message}`);
                 return undefined;
+            }
+            if (isWriteDenied(e)) {
+                // A read-only shared config (e.g. managed by home-manager) is
+                // supported: keep using it, record that nothing was copied,
+                // and say so once. The profiles stay in this editor's backup.
+                const notCopied = complete.map((p) => p.name).filter((n) => !(shared.read()?.profiles ?? []).some((p) => p.name === n));
+                fs.writeFileSync(marker, JSON.stringify({ notCopiedTo: shared.filePath, notCopied, at: new Date().toISOString() }, null, 2));
+                if (notCopied.length > 0) {
+                    vscode.window.showWarningMessage(
+                        `Neon Sync uses ${abbreviateHome(shared.filePath)}, which is read-only here, so these profiles from this editor were not added: ${notCopied.join(', ')}. ` +
+                        `They remain in ${legacy.filePath}.`
+                    );
+                }
+                return { ...report, added: [], notCopied };
             }
             this.legacyFallback = true;
             const reason = e instanceof Error ? e.message : String(e);

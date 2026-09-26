@@ -51,7 +51,7 @@ function ageOf(p: string): number | undefined {
  *   plain file in its place, must not wedge every writer).
  * - Every retry sleeps and checks the deadline: waiting is bounded.
  */
-function withLock<T>(filePath: string, waitMs: number, fn: () => T): T {
+function withLock<T>(filePath: string, waitMs: number, fn: (stillOwned: () => boolean) => T): T {
     const lock = `${filePath}.lock`;
     const takeover = `${lock}.takeover`;
     const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -94,11 +94,18 @@ function withLock<T>(filePath: string, waitMs: number, fn: () => T): T {
         if (Date.now() > deadline) throw new ConfigLockedError(lock);
         sleepSync(25);
     }
+    const stillOwned = () => {
+        try {
+            return fs.readFileSync(`${lock}/${OWNER_FILE}`, 'utf-8') === token;
+        } catch {
+            return false;
+        }
+    };
     try {
-        return fn();
+        return fn(stillOwned);
     } finally {
         try {
-            if (fs.readFileSync(`${lock}/${OWNER_FILE}`, 'utf-8') === token) {
+            if (stillOwned()) {
                 fs.rmSync(lock, { recursive: true, force: true });
             }
         } catch { /* already gone, or taken over */ }
@@ -159,11 +166,14 @@ export class ConfigFileStore {
     update(mutate: (config: ConfigFile) => ConfigFile | undefined): ConfigFile | undefined {
         if (mutate(structuredClone(this.read() ?? { profiles: [] })) === undefined) return undefined;
         fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-        return withLock(this.filePath, this.opts.lockWaitMs ?? LOCK_WAIT_MS, () => {
+        return withLock(this.filePath, this.opts.lockWaitMs ?? LOCK_WAIT_MS, (stillOwned) => {
             const current = this.read() ?? { profiles: [] };
             const next = mutate(structuredClone(current));
             if (next === undefined) return undefined;
             const written: ConfigFile = { ...next, profiles: next.profiles.map(normalizeProfileForWrite) };
+            // A writer stalled past LOCK_STALE_MS (e.g. the machine slept) may
+            // have been taken over; its read is stale, so it must not write.
+            if (!stillOwned()) throw new ConfigLockedError(`${this.filePath}.lock`);
             writeFileAtomic(this.filePath, JSON.stringify(written, null, 2));
             return written;
         });
