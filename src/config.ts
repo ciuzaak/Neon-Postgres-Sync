@@ -168,14 +168,17 @@ export class ConfigManager {
                 return report.added.length > 0 || !shared.exists() ? config : undefined;
             });
         } catch (e) {
-            if (e instanceof ConfigLockedError) {
-                // Busy, not broken: retry next launch. Until then show this
-                // editor's own profiles (read-only) if there's no shared file yet.
+            if (e instanceof ConfigLockedError || (isWriteDenied(e) && !shared.exists())) {
+                // Busy, or a (possibly transient) permission error before the
+                // shared file exists: retry next launch, no marker. Until then
+                // show this editor's own profiles (read-only) if there's no shared file yet.
                 if (!shared.exists()) this.legacyFallback = true;
-                vscode.window.showWarningMessage(`Neon Sync will move this editor's profiles to the shared config next time: ${e.message}`);
+                const reason = e instanceof Error ? e.message : String(e);
+                vscode.window.showWarningMessage(`Neon Sync will move this editor's profiles to the shared config next time: ${reason}`);
                 return undefined;
             }
             if (isWriteDenied(e)) {
+                // The shared file exists but can't be written here.
                 // A read-only shared config (e.g. managed by home-manager) is
                 // supported: keep using it, record that nothing was copied,
                 // and say so once. The profiles stay in this editor's backup.

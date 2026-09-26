@@ -424,3 +424,20 @@ test('a busy lock on the very first migration shows this editor\'s profiles (rea
         fs.rmdirSync(`${sharedPath}.lock`);
     }
 });
+
+test('a permission error before the shared file exists postpones migration (no marker) and shows this editor\'s profiles', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+    const { ConfigManager, legacyPath, sharedPath } = setupMigration({ profiles: [P('a'), P('b')] });
+    fs.chmodSync(path.dirname(sharedPath), 0o555);
+    try {
+        assert.equal(await ConfigManager.migrateLegacyConfig(), undefined);
+        assert.equal(fs.existsSync(`${legacyPath}.migrated`), false);
+        assert.deepEqual(ConfigManager.getProfiles().map((p) => p.name), ['a', 'b']);
+    } finally {
+        fs.chmodSync(path.dirname(sharedPath), 0o755);
+    }
+    // Writable again: the next launch (a fresh initialize) migrates.
+    ConfigManager.initialize({ globalStorageUri: { fsPath: path.dirname(legacyPath) }, secrets: createSecretMock() } as never, {
+        configDir: path.dirname(sharedPath), stateDir: path.join(path.dirname(sharedPath), '.state')
+    });
+    assert.deepEqual((await ConfigManager.migrateLegacyConfig())?.added, ['a', 'b']);
+});
